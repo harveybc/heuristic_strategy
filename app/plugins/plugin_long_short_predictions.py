@@ -91,17 +91,28 @@ class Plugin:
             print(f"[evaluate_candidate] => Merged predictions are empty for candidate {individual}. Returning profit=0.0.")
             return (0.0, {"num_trades": 0, "win_pct": 0, "max_dd": 0, "sharpe": 0})
 
+        # 2) Ensure merged_df has a proper datetime index.
         if merged_df.index.name is None or merged_df.index.name != "DATE_TIME":
             merged_df = merged_df.copy()
-            # When external predictions do not have a date column, assume they are aligned with base_data.
+            # When external predictions do not have a DATE_TIME column, assume they are aligned with base_data.
             merged_df.index = base_data.index[:len(merged_df)]
             merged_df.index.name = "DATE_TIME"
 
-        # 2) Save merged predictions to a temporary CSV file.
+        # 3) Check the scale of the predictions. If the maximum value is very low, assume they are normalized.
+        if merged_df.max().max() < 10:
+            # Try to get a scaling factor from the 'close' column in base_data; if not present, use the first numeric column.
+            if 'close' in base_data.columns:
+                scale_factor = base_data['close'].mean()
+            else:
+                scale_factor = base_data.iloc[:, 0].mean()
+            print(f"[evaluate_candidate] Scaling predictions by factor: {scale_factor:.2f}")
+            merged_df = merged_df * scale_factor
+
+        # 4) Save merged_df to a temporary CSV file.
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # 3) Determine date range.
+        # 5) Determine the date range.
         if hasattr(base_data.index, 'min') and hasattr(base_data.index, 'max'):
             date_start = base_data.index.min().to_pydatetime()
             date_end   = base_data.index.max().to_pydatetime()
@@ -109,7 +120,7 @@ class Plugin:
             date_start = self.params['date_start']
             date_end   = self.params['date_end']
 
-        # 4) Build the Cerebro backtest using our embedded strategy.
+        # 6) Build the Cerebro backtest using our embedded strategy.
         cerebro = bt.Cerebro()
         cerebro.addstrategy(
             self.HeuristicStrategy,
@@ -133,7 +144,7 @@ class Plugin:
         cerebro.adddata(data_feed)
         cerebro.broker.setcash(10000.0)
 
-        # 5) Run the backtest.
+        # 7) Run the backtest.
         try:
             runresult = cerebro.run()
         except Exception as e:
@@ -146,7 +157,7 @@ class Plugin:
         profit = final_value - 10000.0
         print(f"Evaluated candidate {individual} -> Profit: {profit:.2f}")
 
-        # 6) Retrieve trades from the strategy instance.
+        # 8) Retrieve trades from the strategy instance.
         strat_instance = runresult[0]
         trades_list = getattr(strat_instance, "trades", [])
         if config.get("show_trades", True):
@@ -167,10 +178,10 @@ class Plugin:
         if os.path.exists(temp_pred_file):
             os.remove(temp_pred_file)
 
-        # 7) Update the plugin's trades.
+        # 9) Update the plugin’s trades with those from the strategy.
         self.trades = trades_list
 
-        # 8) Compute summary statistics.
+        # 10) Compute summary statistics.
         num_trades = len(trades_list)
         stats = {"num_trades": num_trades, "win_pct": 0, "max_dd": 0, "sharpe": 0}
         if num_trades > 0:
@@ -191,8 +202,6 @@ class Plugin:
 
         return (profit, stats)
 
-    
-    
     
     # -----------------------------------------------------------------------------
     # Embedded Heuristic Strategy
@@ -223,10 +232,11 @@ class Plugin:
         )
 
         def __init__(self, *args, **kwargs):
-            # Call the parent constructor; Backtrader automatically sets self.p with the passed parameters.
+            # Call the parent constructor to automatically set self.p with all passed parameters.
             super().__init__(*args, **kwargs)
             import pandas as pd
-            # Load the predictions CSV using the file name from self.p.pred_file.
+            # Load the predictions CSV from the file given in self.p.pred_file.
+            # (This file is created in evaluate_candidate and is expected to have a proper 'DATE_TIME' column.)
             self.pred_df = pd.read_csv(self.p.pred_file, parse_dates=['DATE_TIME'])
             self.pred_df = self.pred_df[
                 (self.pred_df['DATE_TIME'] >= self.p.date_start) &
@@ -246,7 +256,7 @@ class Plugin:
             self.date_history = []
             self.trade_low = None
             self.trade_high = None
-            self.trades = []  # This will store each trade’s details.
+            self.trades = []  # This list will be populated by notify_trade.
             self.current_tp = None
             self.current_sl = None
             self.current_direction = None
