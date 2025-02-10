@@ -94,13 +94,15 @@ class Plugin:
 
         if merged_df.index.name is None or merged_df.index.name != "DATE_TIME":
             merged_df = merged_df.copy()
+            # When external predictions do not have a date column, assume they are aligned with base_data.
+            merged_df.index = base_data.index[:len(merged_df)]
             merged_df.index.name = "DATE_TIME"
 
         # 2) Save merged predictions to a temporary CSV file.
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # 3) Determine date range.
+        # 3) Determine date range from base_data.
         if hasattr(base_data.index, 'min') and hasattr(base_data.index, 'max'):
             date_start = base_data.index.min().to_pydatetime()
             date_end   = base_data.index.max().to_pydatetime()
@@ -108,7 +110,7 @@ class Plugin:
             date_start = self.params['date_start']
             date_end   = self.params['date_end']
 
-        # 4) Build the Cerebro backtest.
+        # 4) Build the Cerebro backtest using our embedded strategy.
         cerebro = bt.Cerebro()
         cerebro.addstrategy(
             self.HeuristicStrategy,
@@ -116,7 +118,7 @@ class Plugin:
             pip_cost=self.params['pip_cost'],
             rel_volume=rel_volume,
             min_order_volume=self.params['min_order_volume'],
-            max_order_volume=self.params['max_order_volume'],
+            max_order_volume=self.params['max_order_order'] if 'max_order_order' in self.params else self.params['max_order_volume'],
             leverage=self.params['leverage'],
             profit_threshold=profit_threshold,
             date_start=date_start,
@@ -159,24 +161,19 @@ class Plugin:
                     pips = tr.get('pips', 0)
                     max_dd = tr.get('max_dd', 0)
                     print(f"  Trade #{i}: OpenDT={open_dt}, ExitDT={close_dt}, Volume={volume}, "
-                          f"PnL={pnl:.2f}, Pips={pips:.2f}, MaxDD={max_dd:.2f}")
+                        f"PnL={pnl:.2f}, Pips={pips:.2f}, MaxDD={max_dd:.2f}")
             else:
                 print("  No trades were made for this candidate.")
 
         if os.path.exists(temp_pred_file):
             os.remove(temp_pred_file)
 
-        # 7) Update plugin trades with those from this evaluation.
+        # 7) Update the plugin's trades with those from this evaluation.
         self.trades = trades_list
 
         # 8) Compute summary statistics.
         num_trades = len(trades_list)
-        stats = {
-            "num_trades": num_trades,
-            "win_pct": 0,
-            "max_dd": 0,
-            "sharpe": 0
-        }
+        stats = {"num_trades": num_trades, "win_pct": 0, "max_dd": 0, "sharpe": 0}
         if num_trades > 0:
             wins = [1 for tr in trades_list if tr['pnl'] > 0]
             win_pct = (sum(wins) / num_trades) * 100
@@ -188,14 +185,13 @@ class Plugin:
             stats.update({"win_pct": win_pct, "max_dd": max_dd, "sharpe": sharpe})
 
         print(f"[EVALUATE] Candidate result => Profit: {profit:.2f}, "
-              f"Trades: {stats.get('num_trades', 0)}, "
-              f"Win%: {stats.get('win_pct', 0):.1f}, "
-              f"MaxDD: {stats.get('max_dd', 0):.2f}, "
-              f"Sharpe: {stats.get('sharpe', 0):.2f}")
+            f"Trades: {stats.get('num_trades', 0)}, "
+            f"Win%: {stats.get('win_pct', 0):.1f}, "
+            f"MaxDD: {stats.get('max_dd', 0):.2f}, "
+            f"Sharpe: {stats.get('sharpe', 0):.2f}")
 
         return (profit, stats)
 
-    
     
     
     
@@ -206,9 +202,7 @@ class Plugin:
     class HeuristicStrategy(bt.Strategy):
         """
         Forex Dynamic Volume Strategy using perfect future predictions.
-
-        This replicates the original HeuristicStrategy exactly, with all printed messages
-        and the same logic for trade entries, sizing, frequency, and final summary.
+        This replicates your original strategy exactly.
         """
 
         def __init__(self, pred_file, pip_cost, rel_volume, min_order_volume, max_order_volume,
@@ -216,37 +210,16 @@ class Plugin:
                      tp_multiplier, sl_multiplier, lower_rr_threshold, upper_rr_threshold,
                      max_trades_per_5days, *args, **kwargs):
             super().__init__()
-            # Store parameters in self.params for convenience
-            self.params.pred_file = pred_file
-            self.params.pip_cost = pip_cost
-            self.params.rel_volume = rel_volume
-            self.params.min_order_volume = min_order_volume
-            self.params.max_order_volume = max_order_volume
-            self.params.leverage = leverage
-            self.params.profit_threshold = profit_threshold
-            self.params.date_start = date_start
-            self.params.date_end = date_end
-            self.params.min_drawdown_pips = min_drawdown_pips
-            self.params.tp_multiplier = tp_multiplier
-            self.params.sl_multiplier = sl_multiplier
-            self.params.lower_rr_threshold = lower_rr_threshold
-            self.params.upper_rr_threshold = upper_rr_threshold
-            self.params.max_trades_per_5days = max_trades_per_5days
-
-            # Load the CSV with predictions
-            pred_df = pd.read_csv(self.params.pred_file, parse_dates=['DATE_TIME'])
-            pred_df = pred_df[
-                (pred_df['DATE_TIME'] >= self.params.date_start) & 
-                (pred_df['DATE_TIME'] <= self.params.date_end)
-            ]
-            pred_df['DATE_TIME'] = pred_df['DATE_TIME'].apply(
-                lambda dt: dt.replace(minute=0, second=0, microsecond=0)
-            )
+            # Use the parameters from self.p (which are automatically set by Cerebro) rather than self.params.
+            import pandas as pd
+            # Load the predictions CSV.
+            pred_df = pd.read_csv(self.p.pred_file, parse_dates=['DATE_TIME'])
+            # Use the date range provided (which in evaluation is set to the base_data range)
+            pred_df = pred_df[(pred_df['DATE_TIME'] >= self.p.date_start) & (pred_df['DATE_TIME'] <= self.p.date_end)]
+            pred_df['DATE_TIME'] = pred_df['DATE_TIME'].apply(lambda dt: dt.replace(minute=0, second=0, microsecond=0))
             pred_df.set_index('DATE_TIME', inplace=True)
-
-            # Track how many prediction columns exist
-            self.num_hourly_preds = len([c for c in pred_df.columns if c.startswith('Prediction_h_')])
-            self.num_daily_preds = len([c for c in pred_df.columns if c.startswith('Prediction_d_')])
+            self.num_hourly_preds = len([col for col in pred_df.columns if col.startswith('Prediction_h_')])
+            self.num_daily_preds = len([col for col in pred_df.columns if col.startswith('Prediction_d_')])
             self.pred_df = pred_df
 
             self.data0 = self.datas[0]
@@ -256,13 +229,15 @@ class Plugin:
             self.date_history = []
             self.trade_low = None
             self.trade_high = None
-            self.trades = []
+            self.trades = []  # This will store each trade’s details (open_dt, close_dt, volume, pnl, pips, max_dd, etc.)
             self.current_tp = None
             self.current_sl = None
             self.current_direction = None
             self.order_direction = None
             self.trade_entry_bar = None
 
+
+            
         def next(self):
             dt = self.data0.datetime.datetime(0)
             dt_hour = dt.replace(minute=0, second=0, microsecond=0)
