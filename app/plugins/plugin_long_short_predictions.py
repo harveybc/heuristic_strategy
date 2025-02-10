@@ -61,7 +61,6 @@ class Plugin:
         ]
 
 
-
     def evaluate_candidate(self, individual, base_data, hourly_predictions, daily_predictions, config):
         """
         Evaluates a candidate strategy parameter set by merging the provided predictions (hourly and daily)
@@ -102,7 +101,7 @@ class Plugin:
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # 3) Determine date range from base_data.
+        # 3) Determine date range.
         if hasattr(base_data.index, 'min') and hasattr(base_data.index, 'max'):
             date_start = base_data.index.min().to_pydatetime()
             date_end   = base_data.index.max().to_pydatetime()
@@ -118,7 +117,7 @@ class Plugin:
             pip_cost=self.params['pip_cost'],
             rel_volume=rel_volume,
             min_order_volume=self.params['min_order_volume'],
-            max_order_volume=self.params['max_order_order'] if 'max_order_order' in self.params else self.params['max_order_volume'],
+            max_order_volume=self.params['max_order_volume'],
             leverage=self.params['leverage'],
             profit_threshold=profit_threshold,
             date_start=date_start,
@@ -161,14 +160,14 @@ class Plugin:
                     pips = tr.get('pips', 0)
                     max_dd = tr.get('max_dd', 0)
                     print(f"  Trade #{i}: OpenDT={open_dt}, ExitDT={close_dt}, Volume={volume}, "
-                        f"PnL={pnl:.2f}, Pips={pips:.2f}, MaxDD={max_dd:.2f}")
+                          f"PnL={pnl:.2f}, Pips={pips:.2f}, MaxDD={max_dd:.2f}")
             else:
                 print("  No trades were made for this candidate.")
 
         if os.path.exists(temp_pred_file):
             os.remove(temp_pred_file)
 
-        # 7) Update the plugin's trades with those from this evaluation.
+        # 7) Update the plugin's trades.
         self.trades = trades_list
 
         # 8) Compute summary statistics.
@@ -185,14 +184,13 @@ class Plugin:
             stats.update({"win_pct": win_pct, "max_dd": max_dd, "sharpe": sharpe})
 
         print(f"[EVALUATE] Candidate result => Profit: {profit:.2f}, "
-            f"Trades: {stats.get('num_trades', 0)}, "
-            f"Win%: {stats.get('win_pct', 0):.1f}, "
-            f"MaxDD: {stats.get('max_dd', 0):.2f}, "
-            f"Sharpe: {stats.get('sharpe', 0):.2f}")
+              f"Trades: {stats.get('num_trades', 0)}, "
+              f"Win%: {stats.get('win_pct', 0):.1f}, "
+              f"MaxDD: {stats.get('max_dd', 0):.2f}, "
+              f"Sharpe: {stats.get('sharpe', 0):.2f}")
 
         return (profit, stats)
 
-    
     
     
     
@@ -202,26 +200,45 @@ class Plugin:
     class HeuristicStrategy(bt.Strategy):
         """
         Forex Dynamic Volume Strategy using perfect future predictions.
-        This replicates your original strategy exactly.
+        This replicates the original HeuristicStrategy exactly.
         """
 
-        def __init__(self, pred_file, pip_cost, rel_volume, min_order_volume, max_order_volume,
-                     leverage, profit_threshold, date_start, date_end, min_drawdown_pips,
-                     tp_multiplier, sl_multiplier, lower_rr_threshold, upper_rr_threshold,
-                     max_trades_per_5days, *args, **kwargs):
-            super().__init__()
-            # Use the parameters from self.p (which are automatically set by Cerebro) rather than self.params.
-            import pandas as pd
-            # Load the predictions CSV.
-            pred_df = pd.read_csv(self.p.pred_file, parse_dates=['DATE_TIME'])
-            # Use the date range provided (which in evaluation is set to the base_data range)
-            pred_df = pred_df[(pred_df['DATE_TIME'] >= self.p.date_start) & (pred_df['DATE_TIME'] <= self.p.date_end)]
-            pred_df['DATE_TIME'] = pred_df['DATE_TIME'].apply(lambda dt: dt.replace(minute=0, second=0, microsecond=0))
-            pred_df.set_index('DATE_TIME', inplace=True)
-            self.num_hourly_preds = len([col for col in pred_df.columns if col.startswith('Prediction_h_')])
-            self.num_daily_preds = len([col for col in pred_df.columns if col.startswith('Prediction_d_')])
-            self.pred_df = pred_df
+        # Ensure that the strategy defines its parameters as a class attribute.
+        params = (
+            ('pred_file', '../trading-signal/output.csv'),
+            ('pip_cost', 0.00001),
+            ('rel_volume', 0.05),
+            ('min_order_volume', 10000),
+            ('max_order_volume', 1000000),
+            ('leverage', 1000),
+            ('profit_threshold', 5),
+            ('date_start', datetime.datetime(2010, 1, 1)),
+            ('date_end', datetime.datetime(2015, 1, 1)),
+            ('min_drawdown_pips', 10),
+            ('tp_multiplier', 0.9),
+            ('sl_multiplier', 2.0),
+            ('lower_rr_threshold', 0.5),
+            ('upper_rr_threshold', 2.0),
+            ('max_trades_per_5days', 3),
+        )
 
+        def __init__(self, *args, **kwargs):
+            # Call the parent constructor; Backtrader automatically sets self.p with the passed parameters.
+            super().__init__(*args, **kwargs)
+            import pandas as pd
+            # Load the predictions CSV using the file name from self.p.pred_file.
+            self.pred_df = pd.read_csv(self.p.pred_file, parse_dates=['DATE_TIME'])
+            self.pred_df = self.pred_df[
+                (self.pred_df['DATE_TIME'] >= self.p.date_start) &
+                (self.pred_df['DATE_TIME'] <= self.p.date_end)
+            ]
+            self.pred_df['DATE_TIME'] = self.pred_df['DATE_TIME'].apply(
+                lambda dt: dt.replace(minute=0, second=0, microsecond=0)
+            )
+            self.pred_df.set_index('DATE_TIME', inplace=True)
+            # Count the number of prediction columns.
+            self.num_hourly_preds = len([c for c in self.pred_df.columns if c.startswith('Prediction_h_')])
+            self.num_daily_preds = len([c for c in self.pred_df.columns if c.startswith('Prediction_d_')])
             self.data0 = self.datas[0]
             self.initial_balance = self.broker.getvalue()
             self.trade_entry_dates = []
@@ -229,7 +246,7 @@ class Plugin:
             self.date_history = []
             self.trade_low = None
             self.trade_high = None
-            self.trades = []  # This will store each trade’s details (open_dt, close_dt, volume, pnl, pips, max_dd, etc.)
+            self.trades = []  # This will store each trade’s details.
             self.current_tp = None
             self.current_sl = None
             self.current_direction = None
@@ -237,7 +254,7 @@ class Plugin:
             self.trade_entry_bar = None
 
 
-            
+
         def next(self):
             dt = self.data0.datetime.datetime(0)
             dt_hour = dt.replace(minute=0, second=0, microsecond=0)
