@@ -152,19 +152,23 @@ class Plugin:
             base_data.index = pd.to_datetime(base_data.index)
         base_data = base_data.copy()
 
-        # Store extra info in a global variable (since backtesting.py does not allow attaching extra attributes to the data)
+        # Store extra info in a global variable.
         global EXTRA_INFO
         EXTRA_INFO = {"hourly": hourly_predictions, "daily": daily_predictions, "params_config": self.params}
 
         # Create and run the backtest.
         bt_sim = Backtest(base_data, self.HeuristicStrategy, cash=10000, commission=0.0, exclusive_orders=True)
         perf = bt_sim.run()
-        # Try to get final balance using the equity property.
+        # Retrieve final equity: try first 'equity'; if not available, try 'Equity Final'
         try:
             final_balance = perf.equity.iloc[-1]
         except Exception as e:
             print(f"Error accessing final equity via perf.equity: {e}", flush=True)
-            final_balance = 10000
+            try:
+                final_balance = perf["Equity Final"].iloc[-1]
+            except Exception as e2:
+                print(f"Error accessing final equity via perf['Equity Final']: {e2}", flush=True)
+                final_balance = 10000
         profit = final_balance - 10000.0
         print(f"[BACKTEST ANALYZE] Final Balance: {final_balance:.2f} | Profit: {profit:.2f}", flush=True)
         if os.path.exists(temp_pred_file):
@@ -179,8 +183,9 @@ class Plugin:
         Heuristic Trading Strategy.
 
         Entry:
-          - Computes potential profit and risk (in pips) for both long and short orders using daily predictions.
-          - Compares the profit/risk ratios and enters a trade if the potential profit exceeds a threshold.
+          - Uses daily predictions (nearest available by forward-fill) to compute potential profit and risk (in pips)
+            for both long and short orders.
+          - Compares the risk/reward (RR) ratios and enters a trade if the potential profit exceeds a threshold.
           - Order volume is computed proportionally between min_order_volume and max_order_volume.
         Exit:
           - On every tick (assumed hourly), if a position is open, it checks:
@@ -188,8 +193,9 @@ class Plugin:
               * For short: if the current price reaches TP or rises above SL.
         """
         def init(self):
+            # Retrieve extra info from the global variable.
             global EXTRA_INFO
-            self.extra = EXTRA_INFO  # Retrieve extra info (predictions and parameters)
+            self.extra = EXTRA_INFO
             self.trade_entry_bar = None
             self.trade_low = None
             self.trade_high = None
@@ -232,18 +238,20 @@ class Plugin:
                         print("[DEBUG EXIT - SHORT] Price above SL. Closing position early.", flush=True)
                         self.position.close()
                         return
-                return  # Do not check for new entries if a position is open.
+                return  # Do not look for new entries if in a position.
 
             # Not in a position: update extremes.
             self.trade_low = current_price
             self.trade_high = current_price
 
-            # Retrieve daily predictions from the extra info.
+            # Retrieve daily predictions using nearest (ffill) lookup.
             daily_preds_df = self.extra["daily"]
-            try:
-                row = daily_preds_df.loc[dt]
-            except KeyError:
-                row = daily_preds_df.iloc[-1]
+            # Find the nearest index less than or equal to dt.
+            idx = daily_preds_df.index.get_indexer([dt], method='ffill')
+            if idx[0] == -1:
+                row = daily_preds_df.iloc[0]
+            else:
+                row = daily_preds_df.iloc[idx[0]]
             daily_preds = [row[col] for col in row.index if col.startswith("Prediction_d_")]
             if not daily_preds:
                 return
@@ -284,7 +292,7 @@ class Plugin:
                 print("[DEBUG ENTRY] Profit threshold condition not met for either signal.", flush=True)
                 return
 
-            # Store entry metrics for later debug.
+            # Store entry metrics for later debugging.
             self.entry_profit = ideal_profit_pips_buy if signal == 'long' else ideal_profit_pips_sell
             self.entry_risk = ideal_drawdown_pips_buy if signal == 'long' else ideal_drawdown_pips_sell
             self.entry_rr = rr_buy if signal == 'long' else rr_sell
