@@ -408,6 +408,7 @@ class Plugin:
             self.current_sl = chosen_sl
 
 
+
         def compute_size(self, rr):
             min_vol = self.params.min_order_volume
             max_vol = self.params.max_order_volume
