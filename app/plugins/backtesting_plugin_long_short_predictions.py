@@ -1,36 +1,40 @@
+import datetime
 import os
 import pandas as pd
 import numpy as np
 from backtesting import Backtest, Strategy
-from datetime import datetime
-
 
 class Plugin:
     """
-    Plugin for Heuristic Trading Strategy using backtesting.py
+    Plugin for Heuristic Trading Strategy.
 
-    La estrategia se basa en el análisis de predicciones a corto y largo plazo para calcular
-    el beneficio potencial y riesgo (en pips) de operar LONG o SHORT, comparar la tasa beneficio/riesgo
-    (RR) y ejecutar la orden en la dirección con mejor RR (si se supera un umbral). Además, se monitorea
-    cada tick (hora) para cerrar la posición si se alcanza el Take Profit (TP) o si las predicciones indican
-    que el Stop Loss (SL) se alcanzará antes del TP.
+    - Implements a heuristic trading strategy with configurable parameters.
+    - The strategy uses short-term (hourly) and long-term (daily) predictions to:
+        1. Calculate potential profit and risk for both long and short orders.
+        2. Compare their profit/risk ratios and only enter a trade if the ratio exceeds
+           a configurable threshold.
+        3. Set TP (Take Profit) and SL (Stop Loss) levels based on the extremes found in the long-term predictions.
+        4. Continuously monitor the market (each tick, assumed hourly) and exit the trade if:
+           - For a long: the price reaches TP, or if the predicted minimum (from short+long) falls below SL.
+           - For a short: the price reaches TP, or if the predicted maximum rises above SL.
+    - Designed to operate one order at a time.
+    - The parameters are intended to be optimized (using a genetic algorithm, for example).
     """
 
-    # Parámetros por defecto (optimizables)
+    # Default plugin parameters (for optimizer integration)
     plugin_params = {
         'pip_cost': 0.00001,
-        'rel_volume': 0.02,
+        'rel_volume': 0.02,         # Maximum 2% of available balance
         'min_order_volume': 10000,
         'max_order_volume': 1000000,
         'leverage': 1000,
-        'profit_threshold': 5,       # pips
+        'profit_threshold': 5,      # Minimum profit (in pips) to consider a trade
         'min_drawdown_pips': 10,
         'tp_multiplier': 0.9,
         'sl_multiplier': 2.0,
         'lower_rr_threshold': 0.5,
         'upper_rr_threshold': 2.0,
-        'max_trades_per_5days': 3,
-        'time_horizon': 3            # en días (cada día = 24 ticks)
+        'time_horizon': 3           # In days; used to compute expected TP tick (3 days = 72 ticks)
     }
 
     def __init__(self):
@@ -38,14 +42,20 @@ class Plugin:
         self.trades = []
 
     def set_params(self, **kwargs):
+        """Update plugin parameters dynamically."""
         for key, value in kwargs.items():
             if key in self.params:
                 self.params[key] = value
 
     def get_debug_info(self):
+        """Return debugging information for the plugin."""
         return {key: self.params[key] for key in self.params}
 
+    # -------------------------------------------------------------------------
+    # Optimization Interface
+    # -------------------------------------------------------------------------
     def get_optimizable_params(self):
+        """Return parameters that can be optimized along with their bounds."""
         return [
             ("pip_cost", 0.000001, 0.0001),
             ("rel_volume", 0.01, 0.1),
@@ -62,11 +72,15 @@ class Plugin:
         ]
 
     def evaluate_candidate(self, individual, base_data, hourly_predictions, daily_predictions, config):
+        """
+        Evaluates a candidate parameter set using the provided datasets.
+        It updates the plugin parameters and runs a simulation using backtesting.py.
+        """
         import os
         import pandas as pd
         from backtesting import Backtest
 
-        # Desempaquetado: si el candidato tiene 12 valores se usan todos; si tiene 6 se asumen optimizados y se usan los valores actuales.
+        # Desempaquetado: si individual tiene 12 valores se usan todos; si tiene 6 se usan los valores actuales para los no optimizados.
         if len(individual) == 12:
             pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold, \
             min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
@@ -105,7 +119,7 @@ class Plugin:
             hourly_predictions = processed["hourly"]
             daily_predictions = processed["daily"]
 
-        # Fusionar predicciones.
+        # Fusionar predicciones en un DataFrame (este archivo se usará internamente por la estrategia).
         merged_df = pd.DataFrame()
         if hourly_predictions is not None and not hourly_predictions.empty:
             renamed_h = {col: f"Prediction_h_{i+1}" for i, col in enumerate(hourly_predictions.columns)}
@@ -122,14 +136,11 @@ class Plugin:
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # --- Normalizar nombres de columnas en base_data ---
-        # Backtesting.py requiere que base_data tenga las columnas: 'Open', 'High', 'Low', 'Close'
+        # Normalizar columnas del DataFrame base para backtesting.py:
         required_cols = ['Open', 'High', 'Low', 'Close']
-        # Si no se encuentran, se intenta renombrar las columnas en mayúsculas a la versión capitalizada.
         for col in required_cols:
             if col not in base_data.columns and col.upper() in base_data.columns:
                 base_data.rename(columns={col.upper(): col}, inplace=True)
-        # Si alguna sigue faltando, crearla a partir de 'Close' (para Open, High y Low)
         for col in required_cols:
             if col not in base_data.columns:
                 if col != 'Close' and 'Close' in base_data.columns:
@@ -138,16 +149,16 @@ class Plugin:
                 else:
                     raise ValueError(f"Base data must contain '{col}' column.")
 
-        # Asegurarse de que el índice es DatetimeIndex.
+        # Asegurarse de que el índice sea DatetimeIndex.
         base_data = base_data.copy()
         if not isinstance(base_data.index, pd.DatetimeIndex):
             base_data.index = pd.to_datetime(base_data.index)
 
-        # Adjuntar información extra al DataFrame base.
+        # Adjuntar información extra al DataFrame base (usando setattr, ya que no se pueden agregar columnas arbitrarias)
         extra = {"hourly": hourly_predictions, "daily": daily_predictions, "params_config": self.params}
         setattr(base_data, "extra", extra)
 
-        # Crear el objeto Backtest.
+        # Crear y correr la simulación con backtesting.py
         bt_sim = Backtest(base_data, self.HeuristicStrategy, cash=10000, commission=0.0, exclusive_orders=True)
         perf = bt_sim.run()
         final_balance = perf["Equity"].iloc[-1]
@@ -157,150 +168,197 @@ class Plugin:
             os.remove(temp_pred_file)
         return (profit, {"portfolio": perf})
 
-
-
+    # -------------------------------------------------------------------------
+    # Strategy Implementation using backtesting.py
+    # -------------------------------------------------------------------------
     class HeuristicStrategy(Strategy):
+        """
+        Heuristic Trading Strategy.
+        
+        Entry:
+          - Uses short-term (hourly) and long-term (daily) predictions to compute:
+              • Profit potential for long: (max_daily - current_price) / pip_cost.
+              • Risk for long: max( (current_price - min_daily) / pip_cost, min_drawdown_pips ).
+              • Profit potential for short: (current_price - min_daily) / pip_cost.
+              • Risk for short: max( (max_daily - current_price) / pip_cost, min_drawdown_pips ).
+          - Compares profit/risk (RR) of long and short; enters la operación (long o short) con mejor RR siempre
+            que el potencial de ganancia supere un umbral configurable.
+          - El volumen de la orden se determina de forma proporcional, con límites mínimos y máximos.
+        
+        Exit:
+          - Monitorea en cada tick (hora) el comportamiento del mercado.
+          - Para una posición long: cierra si el precio alcanza TP o si las predicciones (corto y largo) indican que
+            se ha alcanzado (o se aproxima a) SL.
+          - Para una posición short: cierra si el precio alcanza TP o si las predicciones indican que se ha alcanzado (o se
+            aproxima a) SL.
+        """
         def init(self):
-            # Recuperar la información extra del DataFrame
-            self.hourly_preds = self.data.extra["hourly"]
-            self.daily_preds = self.data.extra["daily"]
-            self.params_config = self.data.extra["params_config"]
-            # Variables de control
-            self.order_active = False
-            self.current_signal = None
-            self.TP = None
-            self.SL = None
-            self.last_trade_date = None
+            # Inicializar variables de seguimiento
+            self.trade_entry_date = None
+            self.trade_entry_bar = None
             self.trade_low = None
             self.trade_high = None
-            self.entry_metrics = {}  # Para debug: almacenar métricas de entrada
+            self.entry_profit = None
+            self.entry_risk = None
+            self.entry_rr = None
+            self.entry_signal = None
 
         def next(self):
-            current_dt = self.data.index[-1].to_pydatetime()
+            # Se asume que self.data.Close, self.data.Open, etc. están disponibles.
             current_price = self.data.Close[-1]
-            print(f"[ZIPLINE DEBUG TICK] Date: {current_dt} | Price: {current_price:.5f}", flush=True)
+            dt = self.data.index[-1]
 
-            # Si hay posición abierta, evaluar condiciones de salida.
-            if self.order_active:
-                if self.current_signal == "long":
-                    # Para salida, se usan predicciones (falla: se usa la fila correspondiente o la última disponible)
-                    if current_dt in self.daily_preds.index:
-                        row_daily = self.daily_preds.loc[current_dt]
-                    else:
-                        row_daily = self.daily_preds.iloc[-1]
-                    if current_dt in self.hourly_preds.index:
-                        row_hourly = self.hourly_preds.loc[current_dt]
-                    else:
-                        row_hourly = self.hourly_preds.iloc[-1]
-                    preds_combined = list(row_hourly.values) + list(row_daily.values)
-                    predicted_min = min(preds_combined)
-                    print(f"[ZIPLINE DEBUG EXIT - LONG] Price: {current_price:.5f} | TP: {self.TP:.5f} | SL: {self.SL:.5f} | Predicted Min: {predicted_min:.5f}", flush=True)
-                    if current_price >= self.TP or predicted_min < self.SL:
+            # Registrar balance (usando el valor de la cartera de backtesting.py)
+            # Nota: backtesting.py almacena la serie "Equity" en perf; para debug se podría usar self.equity.
+            # Aquí no se registra balance manualmente.
+
+            # Si hay posición abierta, evaluar condiciones de salida:
+            if self.position:
+                if self.entry_signal == 'long':
+                    # Actualizar el mínimo alcanzado durante la operación
+                    if (self.trade_low is None) or (current_price < self.trade_low):
+                        self.trade_low = current_price
+                    # Si el precio alcanza el TP o el mínimo predicho (calculado a partir de la información extra)
+                    # se cierra la posición.
+                    if current_price >= self.current_tp:
                         self.position.close()
-                        self.order_active = False
-                        print("[ZIPLINE DEBUG EXIT - LONG] Exiting long position.", flush=True)
-                elif self.current_signal == "short":
-                    if current_dt in self.hourly_preds.index:
-                        row_hourly = self.hourly_preds.loc[current_dt]
-                    else:
-                        row_hourly = self.hourly_preds.iloc[-1]
-                    if current_dt in self.daily_preds.index:
-                        row_daily = self.daily_preds.loc[current_dt]
-                    else:
-                        row_daily = self.daily_preds.iloc[-1]
-                    preds_combined = list(row_hourly.values) + list(row_daily.values)
-                    predicted_max = max(preds_combined)
-                    print(f"[ZIPLINE DEBUG EXIT - SHORT] Price: {current_price:.5f} | TP: {self.TP:.5f} | SL: {self.SL:.5f} | Predicted Max: {predicted_max:.5f}", flush=True)
-                    if current_price <= self.TP or predicted_max > self.SL:
+                        return
+                    # Para simplificar, si el valor de "Close" es menor al SL calculado, se cierra.
+                    if current_price < self.current_sl:
                         self.position.close()
-                        self.order_active = False
-                        print("[ZIPLINE DEBUG EXIT - SHORT] Exiting short position.", flush=True)
+                        return
+                elif self.entry_signal == 'short':
+                    if (self.trade_high is None) or (current_price > self.trade_high):
+                        self.trade_high = current_price
+                    if current_price <= self.current_tp:
+                        self.position.close()
+                        return
+                    if current_price > self.current_sl:
+                        self.position.close()
+                        return
+                return  # Si hay posición abierta, no se buscan nuevas entradas.
+
+            # Sin posición: reiniciar extremos.
+            self.trade_low = current_price
+            self.trade_high = current_price
+
+            # Obtener las predicciones del DataFrame extra (almacenado en base_data.extra)
+            # Se espera que extra tenga claves "hourly" y "daily"
+            extra = self.data.extra  # Obtenido desde base_data.extra (adjunto con setattr)
+            # Para este ejemplo, usamos únicamente las predicciones diarias para determinar extremos.
+            # Se espera que las predicciones diarias sean un DataFrame indexado por DATE_TIME.
+            # Buscamos la fila correspondiente a la fecha actual (o la más reciente).
+            try:
+                row = extra["daily"].loc[dt]
+            except KeyError:
+                # Si no se encuentra la fecha, usar la última fila disponible.
+                row = extra["daily"].iloc[-1]
+            # Convertir las predicciones en una lista de números.
+            daily_preds = [row[col] for col in row.index if col.startswith("Prediction_d_")]
+            if not daily_preds:
                 return
 
-            # Control de frecuencia: si la última operación fue hace menos de max_trades_per_5days, no entrar.
-            if self.last_trade_date is not None:
-                delta_days = (current_dt - self.last_trade_date).days
-                if delta_days < self.params_config["max_trades_per_5days"]:
-                    print("[ZIPLINE DEBUG ENTRY] Frequency limit active. Skipping entry.", flush=True)
-                    return
+            max_pred = max(daily_preds)
+            min_pred = min(daily_preds)
 
-            # Para entrada: usar predicciones diarias (fila correspondiente o última)
-            if current_dt in self.daily_preds.index:
-                row = self.daily_preds.loc[current_dt]
+            # Calcular condiciones para orden LONG.
+            ideal_profit_pips_buy = (max_pred - current_price) / self.params.pip_cost
+            ideal_drawdown_pips_buy = max((current_price - min_pred) / self.params.pip_cost, self.params.min_drawdown_pips)
+            rr_buy = ideal_profit_pips_buy / ideal_drawdown_pips_buy if ideal_drawdown_pips_buy > 0 else 0
+            tp_buy = current_price + self.params.tp_multiplier * ideal_profit_pips_buy * self.params.pip_cost
+            sl_buy = current_price - self.params.sl_multiplier * ideal_drawdown_pips_buy * self.params.pip_cost
+
+            # Calcular condiciones para orden SHORT.
+            ideal_profit_pips_sell = (current_price - min_pred) / self.params.pip_cost
+            ideal_drawdown_pips_sell = max((max_pred - current_price) / self.params.pip_cost, self.params.min_drawdown_pips)
+            rr_sell = ideal_profit_pips_sell / ideal_drawdown_pips_sell if ideal_drawdown_pips_sell > 0 else 0
+            tp_sell = current_price - self.params.tp_multiplier * ideal_profit_pips_sell * self.params.pip_cost
+            sl_sell = current_price + self.params.sl_multiplier * ideal_drawdown_pips_sell * self.params.pip_cost
+
+            # Imprimir métricas de entrada para debug.
+            print(f"[DEBUG ENTRY] {dt} | Current Price: {current_price:.5f}", flush=True)
+            print(f"[DEBUG ENTRY - LONG] Profit: {ideal_profit_pips_buy:.2f} pips, Risk: {ideal_drawdown_pips_buy:.2f} pips, RR: {rr_buy:.2f}, TP: {tp_buy:.5f}, SL: {sl_buy:.5f}", flush=True)
+            print(f"[DEBUG ENTRY - SHORT] Profit: {ideal_profit_pips_sell:.2f} pips, Risk: {ideal_drawdown_pips_sell:.2f} pips, RR: {rr_sell:.2f}, TP: {tp_sell:.5f}, SL: {sl_sell:.5f}", flush=True)
+
+            # Determinar la señal (entrada long o short) según cuál tenga mayor RR y supere el profit_threshold.
+            if (ideal_profit_pips_buy >= self.params.profit_threshold) and (rr_buy >= rr_sell):
+                signal = 'long'
+                self.current_tp = tp_buy
+                self.current_sl = sl_buy
+            elif (ideal_profit_pips_sell >= self.params.profit_threshold) and (rr_sell > rr_buy):
+                signal = 'short'
+                self.current_tp = tp_sell
+                self.current_sl = sl_sell
             else:
-                row = self.daily_preds.iloc[-1]
-            daily_vals = list(row.values)
-            if not daily_vals or all(pd.isna(daily_vals)):
+                return  # No se cumple la condición mínima de ganancia.
+
+            # Almacenar métricas de entrada para debug en salida de trade.
+            self.entry_profit = ideal_profit_pips_buy if signal == 'long' else ideal_profit_pips_sell
+            self.entry_risk = ideal_drawdown_pips_buy if signal == 'long' else ideal_drawdown_pips_sell
+            self.entry_rr = rr_buy if signal == 'long' else rr_sell
+            self.entry_signal = signal
+
+            # Calcular el tamaño de la orden.
+            # Se usa una función de asignación proporcional según RR (usando min_order_volume y max_order_volume).
+            order_size = self.compute_size(self.entry_rr)
+            if order_size <= 0:
+                print("[DEBUG] Order size <= 0, skipping trade", flush=True)
                 return
-            max_pred = max(daily_vals)
-            min_pred = min(daily_vals)
-            # Cálculos para LONG:
-            ideal_profit_long = (max_pred - current_price) / self.params_config["pip_cost"]
-            ideal_drawdown_long = max((current_price - min_pred) / self.params_config["pip_cost"],
-                                      self.params_config["min_drawdown_pips"])
-            rr_long = ideal_profit_long / ideal_drawdown_long if ideal_drawdown_long > 0 else 0
-            TP_long = current_price + self.params_config["tp_multiplier"] * ideal_profit_long * self.params_config["pip_cost"]
-            SL_long = current_price - self.params_config["sl_multiplier"] * ideal_drawdown_long * self.params_config["pip_cost"]
 
-            # Cálculos para SHORT:
-            ideal_profit_short = (current_price - min_pred) / self.params_config["pip_cost"]
-            ideal_drawdown_short = max((max_pred - current_price) / self.params_config["pip_cost"],
-                                       self.params_config["min_drawdown_pips"])
-            rr_short = ideal_profit_short / ideal_drawdown_short if ideal_drawdown_short > 0 else 0
-            TP_short = current_price - self.params_config["tp_multiplier"] * ideal_profit_short * self.params_config["pip_cost"]
-            SL_short = current_price + self.params_config["sl_multiplier"] * ideal_drawdown_short * self.params_config["pip_cost"]
+            # Ejecutar la orden.
+            if signal == 'long':
+                self.buy(size=order_size)
+                print(f"[DEBUG ENTRY] LONG order executed. Order Size: {order_size}", flush=True)
+            elif signal == 'short':
+                self.sell(size=order_size)
+                print(f"[DEBUG ENTRY] SHORT order executed. Order Size: {order_size}", flush=True)
 
-            print(f"[ZIPLINE DEBUG ENTRY] Price: {current_price:.5f}", flush=True)
-            print(f"[ZIPLINE DEBUG ENTRY - LONG] Profit: {ideal_profit_long:.2f} pips, Risk: {ideal_drawdown_long:.2f} pips, RR: {rr_long:.2f}, TP: {TP_long:.5f}, SL: {SL_long:.5f}", flush=True)
-            print(f"[ZIPLINE DEBUG ENTRY - SHORT] Profit: {ideal_profit_short:.2f} pips, Risk: {ideal_drawdown_short:.2f} pips, RR: {rr_short:.2f}, TP: {TP_short:.5f}, SL: {SL_short:.5f}", flush=True)
-
-            if ideal_profit_long < self.params_config["profit_threshold"] and ideal_profit_short < self.params_config["profit_threshold"]:
-                print("[ZIPLINE DEBUG ENTRY] Profit threshold not met for either side. Skipping entry.", flush=True)
-                return
-
-            if rr_long >= rr_short:
-                signal = "long"
-                chosen_TP = TP_long
-                chosen_SL = SL_long
-                chosen_RR = rr_long
+        def compute_size(self, rr):
+            min_vol = self.params.min_order_volume
+            max_vol = self.params.max_order_volume
+            if rr >= self.params.upper_rr_threshold:
+                size = max_vol
+            elif rr <= self.params.lower_rr_threshold:
+                size = min_vol
             else:
-                signal = "short"
-                chosen_TP = TP_short
-                chosen_SL = SL_short
-                chosen_RR = rr_short
+                size = min_vol + ((rr - self.params.lower_rr_threshold) / 
+                                  (self.params.upper_rr_threshold - self.params.lower_rr_threshold)) * (max_vol - min_vol)
+            cash = self.broker.cash
+            max_from_cash = cash * self.params.rel_volume * self.params.leverage
+            return min(size, max_from_cash)
 
-            # Guardar métricas de entrada para debug en notify_trade
-            self.entry_metrics = {
-                "signal": signal,
-                "entry_profit": ideal_profit_long if signal=="long" else ideal_profit_short,
-                "entry_risk": ideal_drawdown_long if signal=="long" else ideal_drawdown_short,
-                "entry_rr": chosen_RR
-            }
-
-            # Ejecutar la orden. Con backtesting.py se simula operar con el 100% del capital.
-            if signal == "long":
-                self.buy()
-                print("[ZIPLINE DEBUG ENTRY] LONG order executed.", flush=True)
-            else:
-                self.sell()
-                print("[ZIPLINE DEBUG ENTRY] SHORT order executed.", flush=True)
-
-            self.TP = chosen_TP
-            self.SL = chosen_SL
-            self.order_active = True
-            self.last_trade_date = current_dt
-
-        def notify_trade(self, trade):
+        def on_trade(self, trade):
+            # Se llama cuando se cierra un trade.
             if trade.isclosed:
-                duration = len(self.data) - self._tradelength if hasattr(self, '_tradelength') else 0
-                current_balance = self.data.df["Equity"].iloc[-1] if "Equity" in self.data.df.columns else None
-                print(f"[ZIPLINE DEBUG TRADE] Trade closed. PnL: {trade.pnl:.2f} | Duration: {duration} bars", flush=True)
-                # Resetear la señal
-                self.order_active = False
+                duration = len(self) - (self.trade_entry_bar if hasattr(self, "trade_entry_bar") else 0)
+                dt = self.data.index[-1]
+                entry_price = self.order_entry_price if hasattr(self, "order_entry_price") and self.order_entry_price is not None else 0
+                exit_price = trade.price
+                profit_usd = trade.pnl
+                direction = self.entry_signal
+                if direction == 'long':
+                    profit_pips = (exit_price - entry_price) / self.params.pip_cost
+                    intra_dd = (entry_price - self.trade_low) / self.params.pip_cost if self.trade_low is not None else 0
+                elif direction == 'short':
+                    profit_pips = (entry_price - exit_price) / self.params.pip_cost
+                    intra_dd = (self.trade_high - entry_price) / self.params.pip_cost if self.trade_high is not None else 0
+                else:
+                    profit_pips = 0
+                    intra_dd = 0
+                print(f"[DEBUG TRADE ENTRY] Signal: {self.entry_signal} | Entry Profit (pips): {self.entry_profit:.2f} | "
+                      f"Entry Risk (pips): {self.entry_risk:.2f} | Entry RR: {self.entry_rr:.2f}", flush=True)
+                print(f"[DEBUG TRADE CLOSED] ({direction}): Date={dt}, Entry={entry_price:.5f}, Exit={exit_price:.5f}, "
+                      f"Profit (USD)={profit_usd:.2f}, Pips={profit_pips:.2f}, Duration={duration} bars, MaxDD={intra_dd:.2f}, "
+                      f"Balance={self.broker.equity:.2f}", flush=True)
+                # Reset variables for the next trade.
+                self.order_entry_price = None
+                self.current_tp = None
+                self.current_sl = None
+                self.entry_signal = None
 
-
-
-    # Métodos dummy para la interfaz
+    # -------------------------------------------------------------------------
+    # Dummy methods for interface compatibility
+    # -------------------------------------------------------------------------
     def add_debug_info(self, debug_info):
         debug_info.update(self.get_debug_info())
 
