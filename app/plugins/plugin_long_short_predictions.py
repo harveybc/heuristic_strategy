@@ -229,23 +229,26 @@ class Plugin:
         import sys
 
         def next(self):
+            # Get current datetime and price
             dt = self.data0.datetime.datetime(0)
             dt_hour = dt.replace(minute=0, second=0, microsecond=0)
             current_price = self.data0.close[0]
 
-            # Debug: print tick info and flush immediately.
+            # Debug: Print tick info
             print(f"\n[DEBUG TICK] Tick: {len(self)} | Date: {dt} | Current Price: {current_price:.5f}", flush=True)
 
-            # Record balance and date.
+            # Record balance and date
             balance = self.broker.getvalue()
             self.balance_history.append(balance)
             self.date_history.append(dt)
 
-            # --- Exit logic if in position ---
+            # --- EXIT LOGIC: If a position is open, check if it should be closed ---
             if self.position:
                 if self.current_direction == 'long':
+                    # Update the lowest price seen during the trade
                     if self.trade_low is None or current_price < self.trade_low:
                         self.trade_low = current_price
+                    # Get predictions for the current hour
                     if dt_hour in self.pred_df.index:
                         preds_hourly = [self.pred_df.loc[dt_hour].get(f'Prediction_h_{i}', current_price)
                                         for i in range(1, self.num_hourly_preds + 1)]
@@ -253,7 +256,7 @@ class Plugin:
                                     for i in range(1, self.num_daily_preds + 1)]
                         combined_pred_min = min(preds_hourly + preds_daily)
                         combined_pred_max = max(preds_hourly + preds_daily)
-                        long_term_pred_max = max(preds_daily)  # Only long-term predictions
+                        long_term_pred_max = max(preds_daily)  # Only long-term predictions (daily)
                     else:
                         combined_pred_min = current_price
                         combined_pred_max = current_price
@@ -263,7 +266,7 @@ class Plugin:
                         f"Combined Pred Min: {combined_pred_min:.5f} | Combined Pred Max: {combined_pred_max:.5f} | "
                         f"LongTerm Pred Max: {long_term_pred_max:.5f} | Tick: {len(self)} | Expected TP Tick: {self.expected_tp_bar}", flush=True)
 
-                    # Exit conditions for long.
+                    # Exit conditions for long position
                     if current_price >= self.current_tp:
                         print("[DEBUG EXIT - LONG] TP reached.", flush=True)
                         self.close()
@@ -282,6 +285,7 @@ class Plugin:
                         return
 
                 elif self.current_direction == 'short':
+                    # Update the highest price seen during the trade
                     if self.trade_high is None or current_price > self.trade_high:
                         self.trade_high = current_price
                     if dt_hour in self.pred_df.index:
@@ -291,7 +295,7 @@ class Plugin:
                                     for i in range(1, self.num_daily_preds + 1)]
                         combined_pred_min = min(preds_hourly + preds_daily)
                         combined_pred_max = max(preds_hourly + preds_daily)
-                        long_term_pred_min = min(preds_daily)  # Only long-term predictions
+                        long_term_pred_min = min(preds_daily)  # Only long-term predictions (daily)
                     else:
                         combined_pred_min = current_price
                         combined_pred_max = current_price
@@ -301,7 +305,7 @@ class Plugin:
                         f"Combined Pred Min: {combined_pred_min:.5f} | Combined Pred Max: {combined_pred_max:.5f} | "
                         f"LongTerm Pred Min: {long_term_pred_min:.5f} | Tick: {len(self)} | Expected TP Tick: {self.expected_tp_bar}", flush=True)
 
-                    # Exit conditions for short.
+                    # Exit conditions for short position
                     if current_price <= self.current_tp:
                         print("[DEBUG EXIT - SHORT] TP reached.", flush=True)
                         self.close()
@@ -319,12 +323,13 @@ class Plugin:
                         self.close()
                         return
                 return  # Do not seek new entries if a position is open.
+
+            # --- ENTRY LOGIC: If no position is open, reset trade extremes ---
             else:
-                # Reset extremes if no position.
                 self.trade_low = current_price
                 self.trade_high = current_price
 
-            # --- Trade frequency control ---
+            # --- Trade Frequency Control ---
             recent_trades = [d for d in self.trade_entry_dates if (dt - d).days < 5]
             if len(recent_trades) >= self.p.max_trades_per_5days:
                 print(f"[DEBUG] Trade frequency exceeded: {len(recent_trades)} trades in the last 5 days.", flush=True)
