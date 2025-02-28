@@ -67,8 +67,8 @@ class Plugin:
         import pandas as pd
         import backtrader as bt
 
-        # Desempaquetado: Si el candidato tiene 12 valores, se usan todos; 
-        # de lo contrario, se asumen 6 optimizados y se usan los parámetros actuales por defecto para los otros 6.
+        # Desempaquetado: si el candidato tiene 6 valores se usan esos (optimización previa)
+        # y se toman los restantes de los parámetros actuales; si tiene 12, se desempaquetan todos.
         if len(individual) == 12:
             pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold, min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
         elif len(individual) == 6:
@@ -82,7 +82,7 @@ class Plugin:
         else:
             raise ValueError(f"Expected candidate with 6 or 12 values, got {len(individual)}")
 
-        # Actualizar los parámetros del plugin
+        # Actualizar parámetros del plugin con los valores desempaquetados
         self.params['pip_cost'] = pip_cost
         self.params['rel_volume'] = rel_volume
         self.params['min_order_volume'] = min_order_volume
@@ -105,7 +105,7 @@ class Plugin:
             hourly_predictions = processed["hourly"]
             daily_predictions = processed["daily"]
 
-        # Fusionar las predicciones proporcionadas.
+        # Fusionar las predicciones.
         merged_df = pd.DataFrame()
         if hourly_predictions is not None and not hourly_predictions.empty:
             renamed_h = {col: f"Prediction_h_{i+1}" for i, col in enumerate(hourly_predictions.columns)}
@@ -115,20 +115,14 @@ class Plugin:
             renamed_d = {col: f"Prediction_d_{i+1}" for i, col in enumerate(daily_predictions.columns)}
             dr = daily_predictions.rename(columns=renamed_d)
             merged_df = dr.copy() if merged_df.empty else merged_df.join(dr, how="outer")
-
         if merged_df.empty:
             print(f"[evaluate_candidate] => Merged predictions are empty for candidate {individual}. Returning profit=0.0.")
             return (0.0, {"num_trades": 0, "win_pct": 0, "max_dd": 0, "sharpe": 0})
-
-        # Asegurarse de que el índice sea de tipo datetime y se llame "DATE_TIME"
         if merged_df.index.name is None or merged_df.index.name != "DATE_TIME":
             merged_df.index.name = "DATE_TIME"
-
-        # Guardar las predicciones fusionadas en un CSV temporal.
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # Construir el backtest con Cerebro.
         cerebro = bt.Cerebro()
         cerebro.addstrategy(
             self.HeuristicStrategy,
@@ -149,8 +143,6 @@ class Plugin:
         data_feed = bt.feeds.PandasData(dataname=base_data)
         cerebro.adddata(data_feed)
         cerebro.broker.setcash(10000.0)
-
-        # Ejecutar el backtest.
         try:
             runresult = cerebro.run()
         except Exception as e:
@@ -158,12 +150,9 @@ class Plugin:
             if os.path.exists(temp_pred_file):
                 os.remove(temp_pred_file)
             return (-1e6, {"num_trades": 0, "win_pct": 0, "max_dd": 0, "sharpe": 0})
-
         final_value = cerebro.broker.getvalue()
         profit = final_value - 10000.0
         print(f"Evaluated candidate {individual} -> Profit: {profit:.2f}")
-
-        # Recuperar las operaciones realizadas.
         strat_instance = runresult[0]
         trades_list = getattr(strat_instance, "trades", [])
         if config.get("show_trades", True):
@@ -175,13 +164,9 @@ class Plugin:
                         f"Pips={tr.get('pips', 0):.2f}, MaxDD={tr.get('max_dd', 0):.2f}")
             else:
                 print("  No trades were made for this candidate.")
-
         if os.path.exists(temp_pred_file):
             os.remove(temp_pred_file)
-
         self.trades = trades_list
-
-        # Calcular estadísticas de resumen.
         num_trades = len(trades_list)
         stats = {"num_trades": num_trades, "win_pct": 0, "max_dd": 0, "sharpe": 0}
         if num_trades > 0:
@@ -189,17 +174,14 @@ class Plugin:
             win_pct = (wins / num_trades) * 100
             max_dd = max(tr['max_dd'] for tr in trades_list)
             profits = [tr['pnl'] for tr in trades_list]
-            avg_profit = sum(profits) / num_trades
             std_profit = np.std(profits) if num_trades > 1 else 0
             sharpe = (profit / std_profit) if std_profit > 0 else 0
             stats.update({"win_pct": win_pct, "max_dd": max_dd, "sharpe": sharpe})
-
         print(f"[EVALUATE] Candidate result => Profit: {profit:.2f}, "
             f"Trades: {stats.get('num_trades', 0)}, "
             f"Win%: {stats.get('win_pct', 0):.1f}, "
             f"MaxDD: {stats.get('max_dd', 0):.2f}, "
             f"Sharpe: {stats.get('sharpe', 0):.2f}")
-
         return (profit, stats)
 
 
@@ -411,24 +393,23 @@ class Plugin:
                     intra_dd = 0
                 current_balance = self.broker.getvalue()
                 open_dt = self.trade_entry_dates[-1] if self.trade_entry_dates else "N/A"
-                trade_record = {
-                    'open_dt': open_dt,
-                    'close_dt': dt,
-                    'volume': self.current_volume if hasattr(self, "current_volume") and self.current_volume is not None else 0,
-                    'pnl': profit_usd,
-                    'pips': profit_pips,
-                    'duration': duration,
-                    'max_dd': intra_dd
-                }
-                self.trades.append(trade_record)
-                print(f"[DEBUG] TRADE CLOSED ({direction}): Date={dt}, Entry={entry_price:.5f}, Exit={exit_price:.5f}, "
-                      f"Volume={trade_record['volume']}, PnL={profit_usd:.2f}, Pips={profit_pips:.2f}, "
-                      f"Duration={duration} bars, MaxDD={intra_dd:.2f}, Balance={current_balance:.2f}")
+
+                # Imprimir las métricas de entrada almacenadas
+                print(f"[DEBUG TRADE ENTRY] Signal: {self.entry_signal} | Entry Profit (pips): {self.entry_profit:.2f} | "
+                    f"Entry Risk (pips): {self.entry_risk:.2f} | Entry RR: {self.entry_rr:.2f}", flush=True)
+
+                print(f"[DEBUG TRADE CLOSED] ({direction}): Date={dt}, Entry={entry_price:.5f}, Exit={exit_price:.5f}, "
+                    f"Volume={self.current_volume if hasattr(self, 'current_volume') and self.current_volume is not None else 0}, "
+                    f"PnL={profit_usd:.2f}, Pips={profit_pips:.2f}, Duration={duration} bars, MaxDD={intra_dd:.2f}, "
+                    f"Balance={current_balance:.2f}", flush=True)
+
                 self.order_entry_price = None
                 self.current_tp = None
                 self.current_sl = None
                 self.current_direction = None
                 self.current_volume = None
+
+
 
         def stop(self):
             if self.position:
