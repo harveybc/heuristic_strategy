@@ -66,7 +66,7 @@ class Plugin:
         import pandas as pd
         from backtesting import Backtest
 
-        # Desempaquetado: si el candidato tiene 12 valores se usan todos; si tiene 6 se usan los actuales por defecto.
+        # Desempaquetado: si el candidato tiene 12 valores se usan todos; si tiene 6 se asumen optimizados y se usan los valores actuales.
         if len(individual) == 12:
             pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold, \
             min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
@@ -86,7 +86,6 @@ class Plugin:
             'pip_cost': pip_cost,
             'rel_volume': rel_volume,
             'min_order_volume': min_order_volume,
-            'max_order_order': max_order_volume,  # se usa en mensajes, pero se guarda en 'max_order_volume'
             'max_order_volume': max_order_volume,
             'leverage': leverage,
             'profit_threshold': profit_threshold,
@@ -123,9 +122,14 @@ class Plugin:
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # Asegurarse de que base_data tenga las columnas requeridas por backtesting.py.
-        # Se requieren las columnas: 'Open', 'High', 'Low', 'Close'
+        # --- Normalizar nombres de columnas en base_data ---
+        # Backtesting.py requiere que base_data tenga las columnas: 'Open', 'High', 'Low', 'Close'
         required_cols = ['Open', 'High', 'Low', 'Close']
+        # Si no se encuentran, se intenta renombrar las columnas en mayúsculas a la versión capitalizada.
+        for col in required_cols:
+            if col not in base_data.columns and col.upper() in base_data.columns:
+                base_data.rename(columns={col.upper(): col}, inplace=True)
+        # Si alguna sigue faltando, crearla a partir de 'Close' (para Open, High y Low)
         for col in required_cols:
             if col not in base_data.columns:
                 if col != 'Close' and 'Close' in base_data.columns:
@@ -139,7 +143,7 @@ class Plugin:
         if not isinstance(base_data.index, pd.DatetimeIndex):
             base_data.index = pd.to_datetime(base_data.index)
 
-        # Adjuntar información extra al DataFrame base usando setattr (ya que pandas no permite atributos nuevos vía .extra)
+        # Adjuntar información extra al DataFrame base.
         extra = {"hourly": hourly_predictions, "daily": daily_predictions, "params_config": self.params}
         setattr(base_data, "extra", extra)
 
