@@ -226,20 +226,22 @@ class Plugin:
             self.order_direction = None
             self.trade_entry_bar = None
 
+        import sys
+
         def next(self):
             dt = self.data0.datetime.datetime(0)
             dt_hour = dt.replace(minute=0, second=0, microsecond=0)
             current_price = self.data0.close[0]
 
-            # Imprime debug de tick actual
-            print(f"\n[DEBUG TICK] Tick: {len(self)} | Date: {dt} | Current Price: {current_price:.5f}")
+            # Debug: print tick info and flush immediately.
+            print(f"\n[DEBUG TICK] Tick: {len(self)} | Date: {dt} | Current Price: {current_price:.5f}", flush=True)
 
-            # Registra balance y fecha actual.
+            # Record balance and date.
             balance = self.broker.getvalue()
             self.balance_history.append(balance)
             self.date_history.append(dt)
 
-            # --- Lógica de salida si ya se está en posición ---
+            # --- Exit logic if in position ---
             if self.position:
                 if self.current_direction == 'long':
                     if self.trade_low is None or current_price < self.trade_low:
@@ -251,7 +253,7 @@ class Plugin:
                                     for i in range(1, self.num_daily_preds + 1)]
                         combined_pred_min = min(preds_hourly + preds_daily)
                         combined_pred_max = max(preds_hourly + preds_daily)
-                        long_term_pred_max = max(preds_daily)  # Solo predicciones de largo plazo
+                        long_term_pred_max = max(preds_daily)  # Only long-term predictions
                     else:
                         combined_pred_min = current_price
                         combined_pred_max = current_price
@@ -259,23 +261,23 @@ class Plugin:
 
                     print(f"[DEBUG EXIT - LONG] Current Price: {current_price:.5f} | TP: {self.current_tp:.5f} | SL: {self.current_sl:.5f} | "
                         f"Combined Pred Min: {combined_pred_min:.5f} | Combined Pred Max: {combined_pred_max:.5f} | "
-                        f"LongTerm Pred Max: {long_term_pred_max:.5f} | Tick: {len(self)} | Expected TP Tick: {self.expected_tp_bar}")
+                        f"LongTerm Pred Max: {long_term_pred_max:.5f} | Tick: {len(self)} | Expected TP Tick: {self.expected_tp_bar}", flush=True)
 
-                    # Condiciones de salida para posición long.
+                    # Exit conditions for long.
                     if current_price >= self.current_tp:
-                        print("[DEBUG EXIT - LONG] TP alcanzado.")
+                        print("[DEBUG EXIT - LONG] TP reached.", flush=True)
                         self.close()
                         return
                     if combined_pred_min < self.current_sl:
-                        print("[DEBUG EXIT - LONG] Predicción (corto+y largo) indica SL alcanzado.")
+                        print("[DEBUG EXIT - LONG] Combined prediction indicates SL reached.", flush=True)
                         self.close()
                         return
                     if len(self) >= self.expected_tp_bar and combined_pred_max < self.current_tp:
-                        print("[DEBUG EXIT - LONG] Tick esperado alcanzado y Combined Pred Max menor que TP. Cierre temprano.")
+                        print("[DEBUG EXIT - LONG] Tick reached and Combined Pred Max < TP. Early exit.", flush=True)
                         self.close()
                         return
                     if long_term_pred_max < self.current_tp:
-                        print("[DEBUG EXIT - LONG] Predicción a largo plazo indica que TP no se alcanzará. Cierre temprano.")
+                        print("[DEBUG EXIT - LONG] Long-term prediction indicates TP will not be reached. Early exit.", flush=True)
                         self.close()
                         return
 
@@ -289,7 +291,7 @@ class Plugin:
                                     for i in range(1, self.num_daily_preds + 1)]
                         combined_pred_min = min(preds_hourly + preds_daily)
                         combined_pred_max = max(preds_hourly + preds_daily)
-                        long_term_pred_min = min(preds_daily)  # Solo predicciones de largo plazo
+                        long_term_pred_min = min(preds_daily)  # Only long-term predictions
                     else:
                         combined_pred_min = current_price
                         combined_pred_max = current_price
@@ -297,72 +299,72 @@ class Plugin:
 
                     print(f"[DEBUG EXIT - SHORT] Current Price: {current_price:.5f} | TP: {self.current_tp:.5f} | SL: {self.current_sl:.5f} | "
                         f"Combined Pred Min: {combined_pred_min:.5f} | Combined Pred Max: {combined_pred_max:.5f} | "
-                        f"LongTerm Pred Min: {long_term_pred_min:.5f} | Tick: {len(self)} | Expected TP Tick: {self.expected_tp_bar}")
+                        f"LongTerm Pred Min: {long_term_pred_min:.5f} | Tick: {len(self)} | Expected TP Tick: {self.expected_tp_bar}", flush=True)
 
-                    # Condiciones de salida para posición short.
+                    # Exit conditions for short.
                     if current_price <= self.current_tp:
-                        print("[DEBUG EXIT - SHORT] TP alcanzado.")
+                        print("[DEBUG EXIT - SHORT] TP reached.", flush=True)
                         self.close()
                         return
                     if combined_pred_max > self.current_sl:
-                        print("[DEBUG EXIT - SHORT] Predicción (corto+y largo) indica SL alcanzado.")
+                        print("[DEBUG EXIT - SHORT] Combined prediction indicates SL reached.", flush=True)
                         self.close()
                         return
                     if len(self) >= self.expected_tp_bar and combined_pred_min > self.current_tp:
-                        print("[DEBUG EXIT - SHORT] Tick esperado alcanzado y Combined Pred Min mayor que TP. Cierre temprano.")
+                        print("[DEBUG EXIT - SHORT] Tick reached and Combined Pred Min > TP. Early exit.", flush=True)
                         self.close()
                         return
                     if long_term_pred_min > self.current_tp:
-                        print("[DEBUG EXIT - SHORT] Predicción a largo plazo indica que TP no se alcanzará. Cierre temprano.")
+                        print("[DEBUG EXIT - SHORT] Long-term prediction indicates TP will not be reached. Early exit.", flush=True)
                         self.close()
                         return
-                return  # Mientras exista posición abierta, no se buscan nuevas entradas.
+                return  # Do not seek new entries if a position is open.
             else:
-                # Si no hay posición, se resetean los extremos.
+                # Reset extremes if no position.
                 self.trade_low = current_price
                 self.trade_high = current_price
 
-            # --- Control de frecuencia de trading ---
+            # --- Trade frequency control ---
             recent_trades = [d for d in self.trade_entry_dates if (dt - d).days < 5]
             if len(recent_trades) >= self.p.max_trades_per_5days:
-                print(f"[DEBUG] Frecuencia de trading excedida: {len(recent_trades)} trades en los últimos 5 días.")
+                print(f"[DEBUG] Trade frequency exceeded: {len(recent_trades)} trades in the last 5 days.", flush=True)
                 return
 
             if dt_hour not in self.pred_df.index:
-                print("[DEBUG] No hay datos de predicción para la hora actual.")
+                print("[DEBUG] No prediction data for current hour.", flush=True)
                 return
             row = self.pred_df.loc[dt_hour]
             try:
                 daily_preds = [row[f'Prediction_d_{i}'] for i in range(1, self.num_daily_preds + 1)]
             except KeyError:
-                print("[DEBUG] Claves de predicción diaria no encontradas.")
+                print("[DEBUG] Daily prediction keys not found.", flush=True)
                 return
             if not daily_preds or all(pd.isna(daily_preds)):
-                print("[DEBUG] Predicciones diarias vacías o NaN.")
+                print("[DEBUG] Daily predictions empty or NaN.", flush=True)
                 return
 
-            # --- Cálculo de extremos a partir de las predicciones diarias ---
+            # --- Calculate extremes from daily predictions ---
             max_pred = max(daily_preds)
             min_pred = min(daily_preds)
 
-            # --- Condiciones de entrada para orden LONG ---
+            # --- Entry conditions for LONG order ---
             ideal_profit_pips_buy = (max_pred - current_price) / self.p.pip_cost
             ideal_drawdown_pips_buy = max((current_price - min_pred) / self.p.pip_cost, self.p.min_drawdown_pips)
             rr_buy = ideal_profit_pips_buy / ideal_drawdown_pips_buy if ideal_drawdown_pips_buy > 0 else 0
             tp_buy = current_price + self.p.tp_multiplier * ideal_profit_pips_buy * self.p.pip_cost
             sl_buy = current_price - self.p.sl_multiplier * ideal_drawdown_pips_buy * self.p.pip_cost
 
-            # --- Condiciones de entrada para orden SHORT ---
+            # --- Entry conditions for SHORT order ---
             ideal_profit_pips_sell = (current_price - min_pred) / self.p.pip_cost
             ideal_drawdown_pips_sell = max((max_pred - current_price) / self.p.pip_cost, self.p.min_drawdown_pips)
             rr_sell = ideal_profit_pips_sell / ideal_drawdown_pips_sell if ideal_drawdown_pips_sell > 0 else 0
             tp_sell = current_price - self.p.tp_multiplier * ideal_profit_pips_sell * self.p.pip_cost
             sl_sell = current_price + self.p.sl_multiplier * ideal_drawdown_pips_sell * self.p.pip_cost
 
-            # Imprime los valores de depuración para la entrada.
-            print(f"[DEBUG ENTRY] Current Price: {current_price:.5f}")
-            print(f"[DEBUG ENTRY - LONG] Profit: {ideal_profit_pips_buy:.2f} pips, Risk: {ideal_drawdown_pips_buy:.2f} pips, RR: {rr_buy:.2f}, TP: {tp_buy:.5f}, SL: {sl_buy:.5f}")
-            print(f"[DEBUG ENTRY - SHORT] Profit: {ideal_profit_pips_sell:.2f} pips, Risk: {ideal_drawdown_pips_sell:.2f} pips, RR: {rr_sell:.2f}, TP: {tp_sell:.5f}, SL: {sl_sell:.5f}")
+            # Debug prints for entry.
+            print(f"[DEBUG ENTRY] Current Price: {current_price:.5f}", flush=True)
+            print(f"[DEBUG ENTRY - LONG] Profit: {ideal_profit_pips_buy:.2f} pips, Risk: {ideal_drawdown_pips_buy:.2f} pips, RR: {rr_buy:.2f}, TP: {tp_buy:.5f}, SL: {sl_buy:.5f}", flush=True)
+            print(f"[DEBUG ENTRY - SHORT] Profit: {ideal_profit_pips_sell:.2f} pips, Risk: {ideal_drawdown_pips_sell:.2f} pips, RR: {rr_sell:.2f}, TP: {tp_sell:.5f}, SL: {sl_sell:.5f}", flush=True)
 
             long_signal = (ideal_profit_pips_buy >= self.p.profit_threshold)
             short_signal = (ideal_profit_pips_sell >= self.p.profit_threshold)
@@ -378,29 +380,29 @@ class Plugin:
                 chosen_sl = sl_sell
                 chosen_rr = rr_sell
             else:
-                print("[DEBUG ENTRY] No se cumple la condición mínima de profit threshold para ninguna señal.")
+                print("[DEBUG ENTRY] Profit threshold condition not met for either signal.", flush=True)
                 return
 
             order_size = self.compute_size(chosen_rr)
             if order_size <= 0:
-                print("[DEBUG] Order size <= 0, skipping trade")
+                print("[DEBUG] Order size <= 0, skipping trade", flush=True)
                 return
 
-            # Al abrir la orden, guarda el tick actual y calcula el tick esperado para TP.
+            # On order entry, save current tick and calculate expected TP tick.
             self.trade_entry_dates.append(dt)
             self.trade_entry_bar = len(self)
-            # time_horizon es el número de días; cada día tiene 24 ticks.
+            # time_horizon is in days; each day = 24 ticks.
             self.expected_tp_bar = self.trade_entry_bar + int(self.p.time_horizon * 24)
             self.current_volume = order_size
 
             if signal == 'long':
                 self.buy(size=order_size)
                 self.current_direction = 'long'
-                print(f"[DEBUG ENTRY] Orden LONG ejecutada. Order Size: {order_size}")
+                print(f"[DEBUG ENTRY] LONG order executed. Order Size: {order_size}", flush=True)
             elif signal == 'short':
                 self.sell(size=order_size)
                 self.current_direction = 'short'
-                print(f"[DEBUG ENTRY] Orden SHORT ejecutada. Order Size: {order_size}")
+                print(f"[DEBUG ENTRY] SHORT order executed. Order Size: {order_size}", flush=True)
 
             self.current_tp = chosen_tp
             self.current_sl = chosen_sl
