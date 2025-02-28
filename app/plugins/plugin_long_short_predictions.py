@@ -230,18 +230,20 @@ class Plugin:
             dt = self.data0.datetime.datetime(0)
             dt_hour = dt.replace(minute=0, second=0, microsecond=0)
             current_price = self.data0.close[0]
-            
+
+            # Imprime debug de tick actual
+            print(f"\n[DEBUG TICK] Tick: {len(self)} | Date: {dt} | Current Price: {current_price:.5f}")
+
             # Registra balance y fecha actual.
             balance = self.broker.getvalue()
             self.balance_history.append(balance)
             self.date_history.append(dt)
-            
+
             # --- Lógica de salida si ya se está en posición ---
             if self.position:
                 if self.current_direction == 'long':
                     if self.trade_low is None or current_price < self.trade_low:
                         self.trade_low = current_price
-                    # Obtiene predicciones para este tick (hora actual)
                     if dt_hour in self.pred_df.index:
                         preds_hourly = [self.pred_df.loc[dt_hour].get(f'Prediction_h_{i}', current_price)
                                         for i in range(1, self.num_hourly_preds + 1)]
@@ -249,40 +251,37 @@ class Plugin:
                                     for i in range(1, self.num_daily_preds + 1)]
                         combined_pred_min = min(preds_hourly + preds_daily)
                         combined_pred_max = max(preds_hourly + preds_daily)
-                        long_term_pred_max = max(preds_daily)  # solo de largo plazo
+                        long_term_pred_max = max(preds_daily)  # Solo predicciones de largo plazo
                     else:
                         combined_pred_min = current_price
                         combined_pred_max = current_price
                         long_term_pred_max = current_price
 
-                    print(f"[DEBUG EXIT - LONG] Price: {current_price:.5f}, TP: {self.current_tp:.5f}, SL: {self.current_sl:.5f}, "
-                        f"Combined Pred Min: {combined_pred_min:.5f}, Combined Pred Max: {combined_pred_max:.5f}, "
-                        f"LongTerm Pred Max: {long_term_pred_max:.5f}, Tick: {len(self)}, Expected TP Tick: {self.expected_tp_bar}")
-                    
-                    # Condiciones de salida para posición long:
+                    print(f"[DEBUG EXIT - LONG] Current Price: {current_price:.5f} | TP: {self.current_tp:.5f} | SL: {self.current_sl:.5f} | "
+                        f"Combined Pred Min: {combined_pred_min:.5f} | Combined Pred Max: {combined_pred_max:.5f} | "
+                        f"LongTerm Pred Max: {long_term_pred_max:.5f} | Tick: {len(self)} | Expected TP Tick: {self.expected_tp_bar}")
+
+                    # Condiciones de salida para posición long.
                     if current_price >= self.current_tp:
                         print("[DEBUG EXIT - LONG] TP alcanzado.")
                         self.close()
                         return
                     if combined_pred_min < self.current_sl:
-                        print("[DEBUG EXIT - LONG] Predicción (corto + largo) indica SL alcanzado.")
+                        print("[DEBUG EXIT - LONG] Predicción (corto+y largo) indica SL alcanzado.")
                         self.close()
                         return
-                    # Cierre temprano basado en corto plazo: tick esperado alcanzado y el máximo combinado es menor que TP.
                     if len(self) >= self.expected_tp_bar and combined_pred_max < self.current_tp:
                         print("[DEBUG EXIT - LONG] Tick esperado alcanzado y Combined Pred Max menor que TP. Cierre temprano.")
                         self.close()
                         return
-                    # NUEVA condición de cierre temprano basada SOLO en largo plazo:
                     if long_term_pred_max < self.current_tp:
-                        print("[DEBUG EXIT - LONG] Predicción a largo plazo indica que TP no se alcanzará (LongTerm Pred Max < TP). Cierre temprano.")
+                        print("[DEBUG EXIT - LONG] Predicción a largo plazo indica que TP no se alcanzará. Cierre temprano.")
                         self.close()
                         return
 
                 elif self.current_direction == 'short':
                     if self.trade_high is None or current_price > self.trade_high:
                         self.trade_high = current_price
-                    # Obtiene predicciones para este tick
                     if dt_hour in self.pred_df.index:
                         preds_hourly = [self.pred_df.loc[dt_hour].get(f'Prediction_h_{i}', current_price)
                                         for i in range(1, self.num_hourly_preds + 1)]
@@ -290,33 +289,31 @@ class Plugin:
                                     for i in range(1, self.num_daily_preds + 1)]
                         combined_pred_min = min(preds_hourly + preds_daily)
                         combined_pred_max = max(preds_hourly + preds_daily)
-                        long_term_pred_min = min(preds_daily)  # solo de largo plazo
+                        long_term_pred_min = min(preds_daily)  # Solo predicciones de largo plazo
                     else:
                         combined_pred_min = current_price
                         combined_pred_max = current_price
                         long_term_pred_min = current_price
 
-                    print(f"[DEBUG EXIT - SHORT] Price: {current_price:.5f}, TP: {self.current_tp:.5f}, SL: {self.current_sl:.5f}, "
-                        f"Combined Pred Min: {combined_pred_min:.5f}, Combined Pred Max: {combined_pred_max:.5f}, "
-                        f"LongTerm Pred Min: {long_term_pred_min:.5f}, Tick: {len(self)}, Expected TP Tick: {self.expected_tp_bar}")
-                    
-                    # Condiciones de salida para posición short:
+                    print(f"[DEBUG EXIT - SHORT] Current Price: {current_price:.5f} | TP: {self.current_tp:.5f} | SL: {self.current_sl:.5f} | "
+                        f"Combined Pred Min: {combined_pred_min:.5f} | Combined Pred Max: {combined_pred_max:.5f} | "
+                        f"LongTerm Pred Min: {long_term_pred_min:.5f} | Tick: {len(self)} | Expected TP Tick: {self.expected_tp_bar}")
+
+                    # Condiciones de salida para posición short.
                     if current_price <= self.current_tp:
                         print("[DEBUG EXIT - SHORT] TP alcanzado.")
                         self.close()
                         return
                     if combined_pred_max > self.current_sl:
-                        print("[DEBUG EXIT - SHORT] Predicción (corto + largo) indica SL alcanzado.")
+                        print("[DEBUG EXIT - SHORT] Predicción (corto+y largo) indica SL alcanzado.")
                         self.close()
                         return
-                    # Cierre temprano basado en corto plazo: tick esperado alcanzado y el mínimo combinado es mayor que TP.
                     if len(self) >= self.expected_tp_bar and combined_pred_min > self.current_tp:
                         print("[DEBUG EXIT - SHORT] Tick esperado alcanzado y Combined Pred Min mayor que TP. Cierre temprano.")
                         self.close()
                         return
-                    # NUEVA condición de cierre temprano basada SOLO en largo plazo:
                     if long_term_pred_min > self.current_tp:
-                        print("[DEBUG EXIT - SHORT] Predicción a largo plazo indica que TP no se alcanzará (LongTerm Pred Min > TP). Cierre temprano.")
+                        print("[DEBUG EXIT - SHORT] Predicción a largo plazo indica que TP no se alcanzará. Cierre temprano.")
                         self.close()
                         return
                 return  # Mientras exista posición abierta, no se buscan nuevas entradas.
@@ -328,30 +325,34 @@ class Plugin:
             # --- Control de frecuencia de trading ---
             recent_trades = [d for d in self.trade_entry_dates if (dt - d).days < 5]
             if len(recent_trades) >= self.p.max_trades_per_5days:
+                print(f"[DEBUG] Frecuencia de trading excedida: {len(recent_trades)} trades en los últimos 5 días.")
                 return
 
             if dt_hour not in self.pred_df.index:
+                print("[DEBUG] No hay datos de predicción para la hora actual.")
                 return
             row = self.pred_df.loc[dt_hour]
             try:
                 daily_preds = [row[f'Prediction_d_{i}'] for i in range(1, self.num_daily_preds + 1)]
             except KeyError:
+                print("[DEBUG] Claves de predicción diaria no encontradas.")
                 return
             if not daily_preds or all(pd.isna(daily_preds)):
+                print("[DEBUG] Predicciones diarias vacías o NaN.")
                 return
 
             # --- Cálculo de extremos a partir de las predicciones diarias ---
             max_pred = max(daily_preds)
             min_pred = min(daily_preds)
 
-            # --- Condiciones de entrada para una orden LONG ---
+            # --- Condiciones de entrada para orden LONG ---
             ideal_profit_pips_buy = (max_pred - current_price) / self.p.pip_cost
             ideal_drawdown_pips_buy = max((current_price - min_pred) / self.p.pip_cost, self.p.min_drawdown_pips)
             rr_buy = ideal_profit_pips_buy / ideal_drawdown_pips_buy if ideal_drawdown_pips_buy > 0 else 0
             tp_buy = current_price + self.p.tp_multiplier * ideal_profit_pips_buy * self.p.pip_cost
             sl_buy = current_price - self.p.sl_multiplier * ideal_drawdown_pips_buy * self.p.pip_cost
 
-            # --- Condiciones de entrada para una orden SHORT ---
+            # --- Condiciones de entrada para orden SHORT ---
             ideal_profit_pips_sell = (current_price - min_pred) / self.p.pip_cost
             ideal_drawdown_pips_sell = max((max_pred - current_price) / self.p.pip_cost, self.p.min_drawdown_pips)
             rr_sell = ideal_profit_pips_sell / ideal_drawdown_pips_sell if ideal_drawdown_pips_sell > 0 else 0
@@ -377,6 +378,7 @@ class Plugin:
                 chosen_sl = sl_sell
                 chosen_rr = rr_sell
             else:
+                print("[DEBUG ENTRY] No se cumple la condición mínima de profit threshold para ninguna señal.")
                 return
 
             order_size = self.compute_size(chosen_rr)
@@ -384,7 +386,7 @@ class Plugin:
                 print("[DEBUG] Order size <= 0, skipping trade")
                 return
 
-            # Al abrir la orden, se guarda el tick (barra) actual y se calcula el tick esperado para TP.
+            # Al abrir la orden, guarda el tick actual y calcula el tick esperado para TP.
             self.trade_entry_dates.append(dt)
             self.trade_entry_bar = len(self)
             # time_horizon es el número de días; cada día tiene 24 ticks.
@@ -394,13 +396,14 @@ class Plugin:
             if signal == 'long':
                 self.buy(size=order_size)
                 self.current_direction = 'long'
+                print(f"[DEBUG ENTRY] Orden LONG ejecutada. Order Size: {order_size}")
             elif signal == 'short':
                 self.sell(size=order_size)
                 self.current_direction = 'short'
+                print(f"[DEBUG ENTRY] Orden SHORT ejecutada. Order Size: {order_size}")
 
             self.current_tp = chosen_tp
             self.current_sl = chosen_sl
-
 
 
         def compute_size(self, rr):
