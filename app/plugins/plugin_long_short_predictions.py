@@ -229,15 +229,14 @@ class Plugin:
         import sys
 
         def next(self):
-            # Get current datetime and price
             dt = self.data0.datetime.datetime(0)
             dt_hour = dt.replace(minute=0, second=0, microsecond=0)
             current_price = self.data0.close[0]
 
-            # Debug: Print tick info
+            # Debug: Print tick info immediately.
             print(f"\n[DEBUG TICK] Tick: {len(self)} | Date: {dt} | Current Price: {current_price:.5f}", flush=True)
 
-            # Record balance and date
+            # Record balance and date.
             balance = self.broker.getvalue()
             self.balance_history.append(balance)
             self.date_history.append(dt)
@@ -245,10 +244,8 @@ class Plugin:
             # --- EXIT LOGIC: If a position is open, check if it should be closed ---
             if self.position:
                 if self.current_direction == 'long':
-                    # Update the lowest price seen during the trade
                     if self.trade_low is None or current_price < self.trade_low:
                         self.trade_low = current_price
-                    # Get predictions for the current hour
                     if dt_hour in self.pred_df.index:
                         preds_hourly = [self.pred_df.loc[dt_hour].get(f'Prediction_h_{i}', current_price)
                                         for i in range(1, self.num_hourly_preds + 1)]
@@ -256,7 +253,7 @@ class Plugin:
                                     for i in range(1, self.num_daily_preds + 1)]
                         combined_pred_min = min(preds_hourly + preds_daily)
                         combined_pred_max = max(preds_hourly + preds_daily)
-                        long_term_pred_max = max(preds_daily)  # Only long-term predictions (daily)
+                        long_term_pred_max = max(preds_daily)  # Only long-term predictions
                     else:
                         combined_pred_min = current_price
                         combined_pred_max = current_price
@@ -266,7 +263,6 @@ class Plugin:
                         f"Combined Pred Min: {combined_pred_min:.5f} | Combined Pred Max: {combined_pred_max:.5f} | "
                         f"LongTerm Pred Max: {long_term_pred_max:.5f} | Tick: {len(self)} | Expected TP Tick: {self.expected_tp_bar}", flush=True)
 
-                    # Exit conditions for long position
                     if current_price >= self.current_tp:
                         print("[DEBUG EXIT - LONG] TP reached.", flush=True)
                         self.close()
@@ -285,7 +281,6 @@ class Plugin:
                         return
 
                 elif self.current_direction == 'short':
-                    # Update the highest price seen during the trade
                     if self.trade_high is None or current_price > self.trade_high:
                         self.trade_high = current_price
                     if dt_hour in self.pred_df.index:
@@ -295,7 +290,7 @@ class Plugin:
                                     for i in range(1, self.num_daily_preds + 1)]
                         combined_pred_min = min(preds_hourly + preds_daily)
                         combined_pred_max = max(preds_hourly + preds_daily)
-                        long_term_pred_min = min(preds_daily)  # Only long-term predictions (daily)
+                        long_term_pred_min = min(preds_daily)  # Only long-term predictions
                     else:
                         combined_pred_min = current_price
                         combined_pred_max = current_price
@@ -305,7 +300,6 @@ class Plugin:
                         f"Combined Pred Min: {combined_pred_min:.5f} | Combined Pred Max: {combined_pred_max:.5f} | "
                         f"LongTerm Pred Min: {long_term_pred_min:.5f} | Tick: {len(self)} | Expected TP Tick: {self.expected_tp_bar}", flush=True)
 
-                    # Exit conditions for short position
                     if current_price <= self.current_tp:
                         print("[DEBUG EXIT - SHORT] TP reached.", flush=True)
                         self.close()
@@ -323,9 +317,8 @@ class Plugin:
                         self.close()
                         return
                 return  # Do not seek new entries if a position is open.
-
-            # --- ENTRY LOGIC: If no position is open, reset trade extremes ---
             else:
+                # Reset trade extremes if no position.
                 self.trade_low = current_price
                 self.trade_high = current_price
 
@@ -388,6 +381,12 @@ class Plugin:
                 print("[DEBUG ENTRY] Profit threshold condition not met for either signal.", flush=True)
                 return
 
+            # Store the entry metrics for later debug in notify_trade()
+            self.entry_profit = ideal_profit_pips_buy if signal == 'long' else ideal_profit_pips_sell
+            self.entry_risk = ideal_drawdown_pips_buy if signal == 'long' else ideal_drawdown_pips_sell
+            self.entry_rr = chosen_rr
+            self.entry_signal = signal
+
             order_size = self.compute_size(chosen_rr)
             if order_size <= 0:
                 print("[DEBUG] Order size <= 0, skipping trade", flush=True)
@@ -411,7 +410,6 @@ class Plugin:
 
             self.current_tp = chosen_tp
             self.current_sl = chosen_sl
-
 
 
         def compute_size(self, rr):
@@ -452,19 +450,13 @@ class Plugin:
                     intra_dd = 0
                 current_balance = self.broker.getvalue()
                 open_dt = self.trade_entry_dates[-1] if self.trade_entry_dates else "N/A"
-                trade_record = {
-                    'open_dt': open_dt,
-                    'close_dt': dt,
-                    'volume': self.current_volume if hasattr(self, "current_volume") and self.current_volume is not None else 0,
-                    'pnl': profit_usd,
-                    'pips': profit_pips,
-                    'duration': duration,
-                    'max_dd': intra_dd
-                }
-                self.trades.append(trade_record)
+                # Print stored entry metrics along with the trade closed message.
+                print(f"[DEBUG TRADE ENTRY] Signal: {self.entry_signal} | Entry Profit (pips): {self.entry_profit:.2f} | "
+                    f"Entry Risk (pips): {self.entry_risk:.2f} | Entry RR: {self.entry_rr:.2f}", flush=True)
                 print(f"[DEBUG] TRADE CLOSED ({direction}): Date={dt}, Entry={entry_price:.5f}, Exit={exit_price:.5f}, "
-                      f"Volume={trade_record['volume']}, PnL={profit_usd:.2f}, Pips={profit_pips:.2f}, "
-                      f"Duration={duration} bars, MaxDD={intra_dd:.2f}, Balance={current_balance:.2f}")
+                    f"Volume={self.current_volume if hasattr(self, 'current_volume') and self.current_volume is not None else 0}, "
+                    f"PnL={profit_usd:.2f}, Pips={profit_pips:.2f}, Duration={duration} bars, MaxDD={intra_dd:.2f}, "
+                    f"Balance={current_balance:.2f}", flush=True)
                 self.order_entry_price = None
                 self.current_tp = None
                 self.current_sl = None
