@@ -67,10 +67,22 @@ class Plugin:
         import pandas as pd
         import backtrader as bt
 
-        # Desempaquetamos 12 parámetros en lugar de 6
-        pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold, min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
+        # Verificamos la longitud del candidato: si son 6 valores, se asumen que son los optimizados anteriormente,
+        # y se toman los demás de los parámetros por defecto.
+        if len(individual) == 6:
+            profit_threshold, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
+            pip_cost = self.params['pip_cost']
+            rel_volume = self.params['rel_volume']
+            min_order_volume = self.params['min_order_volume']
+            max_order_volume = self.params['max_order_volume']
+            leverage = self.params['leverage']
+            min_drawdown_pips = self.params['min_drawdown_pips']
+        elif len(individual) == 12:
+            pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold, min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
+        else:
+            raise ValueError(f"Expected candidate with 6 or 12 values, got {len(individual)}")
 
-        # Actualizamos los parámetros del plugin con los valores del candidato
+        # Actualizamos los parámetros del plugin con los valores del candidato.
         self.params['pip_cost'] = pip_cost
         self.params['rel_volume'] = rel_volume
         self.params['min_order_volume'] = min_order_volume
