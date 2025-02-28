@@ -63,19 +63,28 @@ class Plugin:
         ]
 
     def evaluate_candidate(self, individual, base_data, hourly_predictions, daily_predictions, config):
-        """
-        Evaluates a candidate strategy parameter set using the provided datasets.
-        Supports both external prediction files and auto-generated predictions.
-        """
         import os
         import pandas as pd
         import backtrader as bt
 
-        # Unpack candidate parameters:
-        # (profit_threshold, tp_multiplier, sl_multiplier, lower_rr_threshold, upper_rr_threshold, time_horizon)
-        profit_threshold, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
+        # Desempaquetamos 12 parámetros en lugar de 6
+        pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold, min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
 
-        # Auto-generate predictions if none provided.
+        # Actualizamos los parámetros del plugin con los valores del candidato
+        self.params['pip_cost'] = pip_cost
+        self.params['rel_volume'] = rel_volume
+        self.params['min_order_volume'] = min_order_volume
+        self.params['max_order_volume'] = max_order_volume
+        self.params['leverage'] = leverage
+        self.params['profit_threshold'] = profit_threshold
+        self.params['min_drawdown_pips'] = min_drawdown_pips
+        self.params['tp_multiplier'] = tp_multiplier
+        self.params['sl_multiplier'] = sl_multiplier
+        self.params['lower_rr_threshold'] = lower_rr
+        self.params['upper_rr_threshold'] = upper_rr
+        self.params['time_horizon'] = int(time_horizon)
+
+        # Auto-generar predicciones si no se han proporcionado.
         if (config['hourly_predictions_file'] is None) and (config['daily_predictions_file'] is None):
             print(f"[evaluate_candidate] Auto-generating predictions using time_horizon={int(time_horizon)} for candidate {individual}.")
             config["time_horizon"] = int(time_horizon)
@@ -84,7 +93,7 @@ class Plugin:
             hourly_predictions = processed["hourly"]
             daily_predictions = processed["daily"]
 
-        # Merge provided predictions.
+        # Fusionar las predicciones proporcionadas.
         merged_df = pd.DataFrame()
         if hourly_predictions is not None and not hourly_predictions.empty:
             renamed_h = {col: f"Prediction_h_{i+1}" for i, col in enumerate(hourly_predictions.columns)}
@@ -99,15 +108,15 @@ class Plugin:
             print(f"[evaluate_candidate] => Merged predictions are empty for candidate {individual}. Returning profit=0.0.")
             return (0.0, {"num_trades": 0, "win_pct": 0, "max_dd": 0, "sharpe": 0})
 
-        # Ensure datetime index.
+        # Asegurarse de que el índice sea de tipo datetime y se llame "DATE_TIME"
         if merged_df.index.name is None or merged_df.index.name != "DATE_TIME":
             merged_df.index.name = "DATE_TIME"
 
-        # Save merged predictions to temporary CSV.
+        # Guardar las predicciones fusionadas en un CSV temporal.
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # Build Cerebro backtest.
+        # Construir el backtest con Cerebro.
         cerebro = bt.Cerebro()
         cerebro.addstrategy(
             self.HeuristicStrategy,
@@ -129,7 +138,7 @@ class Plugin:
         cerebro.adddata(data_feed)
         cerebro.broker.setcash(10000.0)
 
-        # Run backtest.
+        # Ejecutar el backtest.
         try:
             runresult = cerebro.run()
         except Exception as e:
@@ -142,7 +151,7 @@ class Plugin:
         profit = final_value - 10000.0
         print(f"Evaluated candidate {individual} -> Profit: {profit:.2f}")
 
-        # Retrieve trades.
+        # Recuperar las operaciones realizadas.
         strat_instance = runresult[0]
         trades_list = getattr(strat_instance, "trades", [])
         if config.get("show_trades", True):
@@ -150,8 +159,8 @@ class Plugin:
                 print(f"Trades for candidate {individual}:")
                 for i, tr in enumerate(trades_list, 1):
                     print(f"  Trade #{i}: OpenDT={tr.get('open_dt', 'N/A')}, ExitDT={tr.get('close_dt', 'N/A')}, "
-                          f"Volume={tr.get('volume', 0)}, PnL={tr.get('pnl', 0):.2f}, "
-                          f"Pips={tr.get('pips', 0):.2f}, MaxDD={tr.get('max_dd', 0):.2f}")
+                        f"Volume={tr.get('volume', 0)}, PnL={tr.get('pnl', 0):.2f}, "
+                        f"Pips={tr.get('pips', 0):.2f}, MaxDD={tr.get('max_dd', 0):.2f}")
             else:
                 print("  No trades were made for this candidate.")
 
@@ -160,7 +169,7 @@ class Plugin:
 
         self.trades = trades_list
 
-        # Compute summary statistics.
+        # Calcular estadísticas de resumen.
         num_trades = len(trades_list)
         stats = {"num_trades": num_trades, "win_pct": 0, "max_dd": 0, "sharpe": 0}
         if num_trades > 0:
@@ -174,12 +183,13 @@ class Plugin:
             stats.update({"win_pct": win_pct, "max_dd": max_dd, "sharpe": sharpe})
 
         print(f"[EVALUATE] Candidate result => Profit: {profit:.2f}, "
-              f"Trades: {stats.get('num_trades', 0)}, "
-              f"Win%: {stats.get('win_pct', 0):.1f}, "
-              f"MaxDD: {stats.get('max_dd', 0):.2f}, "
-              f"Sharpe: {stats.get('sharpe', 0):.2f}")
+            f"Trades: {stats.get('num_trades', 0)}, "
+            f"Win%: {stats.get('win_pct', 0):.1f}, "
+            f"MaxDD: {stats.get('max_dd', 0):.2f}, "
+            f"Sharpe: {stats.get('sharpe', 0):.2f}")
 
         return (profit, stats)
+
 
     class HeuristicStrategy(bt.Strategy):
         """
