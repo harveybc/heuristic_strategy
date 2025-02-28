@@ -12,11 +12,12 @@ class Plugin:
     Plugin for Heuristic Trading Strategy using backtesting.py.
 
     - Implements a heuristic trading strategy that uses short-term (hourly) and long-term (daily) predictions.
-    - The strategy calculates the profit potential and risk (in pips) for both long and short sides, compares their risk/reward (RR) ratios,
-      and only enters a trade if the potential profit exceeds a configurable threshold.
-    - Once in a trade (only one at a time), it monitors on an hourly basis to exit if the price reaches the Take Profit (TP)
-      or breaches the Stop Loss (SL) level.
-    - All key parameters (such as pip cost, volume limits, thresholds, multipliers, etc.) are configurable and optimizable.
+    - The strategy calculates potential profit and risk (in pips) for both long and short orders,
+      compares their risk/reward (RR) ratios, and only enters a trade if the potential profit exceeds a threshold.
+    - Once in a trade, it monitors the market (each tick, assumed hourly) and exits if either
+      the take profit (TP) is reached or the stop loss (SL) is breached.
+    - Only one order is active at a time.
+    - All key parameters (e.g. pip cost, volume limits, thresholds, multipliers, etc.) are configurable and optimizable.
     """
 
     # Default plugin parameters (for optimizer integration)
@@ -72,8 +73,8 @@ class Plugin:
     def evaluate_candidate(self, individual, base_data, hourly_predictions, daily_predictions, config):
         """
         Evaluates a candidate parameter set using the provided datasets.
-        This method updates the plugin parameters, merges prediction DataFrames,
-        ensures that the base_data has the required columns, and then creates and runs a Backtest.
+        Updates plugin parameters, merges prediction DataFrames, normalizes the base data,
+        and runs a backtest simulation using backtesting.py.
         """
         import os
         import pandas as pd
@@ -112,7 +113,7 @@ class Plugin:
 
         # Auto-generate predictions if not provided.
         if (config.get('hourly_predictions_file') is None) and (config.get('daily_predictions_file') is None):
-            print(f"[evaluate_candidate] Auto-generating predictions using time_horizon={int(time_horizon)} for candidate {individual}.")
+            print(f"[evaluate_candidate] Auto-generating predictions using time_horizon={int(time_horizon)} for candidate {individual}.", flush=True)
             from data_processor import process_data
             processed = process_data(config)
             hourly_predictions = processed["hourly"]
@@ -129,13 +130,13 @@ class Plugin:
             dr = daily_predictions.rename(columns=renamed_d)
             merged_df = dr.copy() if merged_df.empty else merged_df.join(dr, how="outer")
         if merged_df.empty:
-            print(f"[evaluate_candidate] => Merged predictions are empty for candidate {individual}. Returning profit=0.0.")
+            print(f"[evaluate_candidate] => Merged predictions are empty for candidate {individual}. Returning profit=0.0.", flush=True)
             return (0.0, {"num_trades": 0, "win_pct": 0, "max_dd": 0, "sharpe": 0})
         merged_df.index.name = "DATE_TIME"
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # Normalize base_data: backtesting.py requires columns: 'Open', 'High', 'Low', 'Close'
+        # Normalize base_data for backtesting.py (required columns: 'Open', 'High', 'Low', 'Close').
         required_cols = ['Open', 'High', 'Low', 'Close']
         for col in required_cols:
             if col not in base_data.columns and col.upper() in base_data.columns:
@@ -143,28 +144,27 @@ class Plugin:
         for col in required_cols:
             if col not in base_data.columns:
                 if col != 'Close' and 'Close' in base_data.columns:
-                    print(f"[evaluate_candidate] Column '{col}' missing. Creating it using 'Close'.")
+                    print(f"[evaluate_candidate] Column '{col}' missing. Creating it using 'Close'.", flush=True)
                     base_data[col] = base_data['Close']
                 else:
                     raise ValueError(f"Base data must contain '{col}' column.")
-
         if not isinstance(base_data.index, pd.DatetimeIndex):
             base_data.index = pd.to_datetime(base_data.index)
         base_data = base_data.copy()
 
-        # Instead of attaching extra info to base_data (which backtesting.py does not allow),
-        # store it in a global variable.
+        # Store extra info in a global variable (since backtesting.py does not allow attaching extra attributes to the data)
         global EXTRA_INFO
         EXTRA_INFO = {"hourly": hourly_predictions, "daily": daily_predictions, "params_config": self.params}
 
         # Create and run the backtest.
         bt_sim = Backtest(base_data, self.HeuristicStrategy, cash=10000, commission=0.0, exclusive_orders=True)
         perf = bt_sim.run()
-        # Try to retrieve final equity. If perf does not have "Equity", use the internal _stats.
+        # Try to get final balance using the equity property.
         try:
-            final_balance = perf["Equity"].iloc[-1]
-        except KeyError:
-            final_balance = perf._stats.get("Equity Final", 10000)
+            final_balance = perf.equity.iloc[-1]
+        except Exception as e:
+            print(f"Error accessing final equity via perf.equity: {e}", flush=True)
+            final_balance = 10000
         profit = final_balance - 10000.0
         print(f"[BACKTEST ANALYZE] Final Balance: {final_balance:.2f} | Profit: {profit:.2f}", flush=True)
         if os.path.exists(temp_pred_file):
@@ -180,16 +180,16 @@ class Plugin:
 
         Entry:
           - Computes potential profit and risk (in pips) for both long and short orders using daily predictions.
-          - Compares profit/risk ratios and enters a trade if the profit potential exceeds the configured threshold.
+          - Compares the profit/risk ratios and enters a trade if the potential profit exceeds a threshold.
           - Order volume is computed proportionally between min_order_volume and max_order_volume.
         Exit:
-          - At every tick (assumed hourly), if a position is open, the strategy checks if:
-              * For long: the current price has reached TP or fallen below SL.
-              * For short: the current price has reached TP or risen above SL.
+          - On every tick (assumed hourly), if a position is open, it checks:
+              * For long: if the current price reaches TP or falls below SL.
+              * For short: if the current price reaches TP or rises above SL.
         """
         def init(self):
             global EXTRA_INFO
-            self.extra = EXTRA_INFO  # Retrieve extra info (predictions and config) from global variable.
+            self.extra = EXTRA_INFO  # Retrieve extra info (predictions and parameters)
             self.trade_entry_bar = None
             self.trade_low = None
             self.trade_high = None
@@ -232,13 +232,13 @@ class Plugin:
                         print("[DEBUG EXIT - SHORT] Price above SL. Closing position early.", flush=True)
                         self.position.close()
                         return
-                return  # If in position, do not check for new entries.
+                return  # Do not check for new entries if a position is open.
 
             # Not in a position: update extremes.
             self.trade_low = current_price
             self.trade_high = current_price
 
-            # Retrieve daily predictions from extra info.
+            # Retrieve daily predictions from the extra info.
             daily_preds_df = self.extra["daily"]
             try:
                 row = daily_preds_df.loc[dt]
@@ -266,12 +266,12 @@ class Plugin:
             tp_sell = current_price - self.extra["params_config"]['tp_multiplier'] * ideal_profit_pips_sell * self.extra["params_config"]['pip_cost']
             sl_sell = current_price + self.extra["params_config"]['sl_multiplier'] * ideal_drawdown_pips_sell * self.extra["params_config"]['pip_cost']
 
-            # Print entry debug information.
+            # Print entry debug info.
             print(f"[DEBUG ENTRY] {dt} | Price: {current_price:.5f}", flush=True)
             print(f"[DEBUG ENTRY - LONG] Profit: {ideal_profit_pips_buy:.2f} pips, Risk: {ideal_drawdown_pips_buy:.2f} pips, RR: {rr_buy:.2f}, TP: {tp_buy:.5f}, SL: {sl_buy:.5f}", flush=True)
             print(f"[DEBUG ENTRY - SHORT] Profit: {ideal_profit_pips_sell:.2f} pips, Risk: {ideal_drawdown_pips_sell:.2f} pips, RR: {rr_sell:.2f}, TP: {tp_sell:.5f}, SL: {sl_sell:.5f}", flush=True)
 
-            # Determine which signal to take.
+            # Determine signal.
             if (ideal_profit_pips_buy >= self.extra["params_config"]['profit_threshold']) and (rr_buy >= rr_sell):
                 signal = 'long'
                 self.current_tp = tp_buy
@@ -296,14 +296,14 @@ class Plugin:
                 print("[DEBUG] Order size <= 0, skipping trade", flush=True)
                 return
 
-            # Mark the entry.
+            # Mark entry.
             if not hasattr(self, "trade_entry_dates"):
                 self.trade_entry_dates = []
             self.trade_entry_dates.append(dt)
             self.trade_entry_bar = len(self)
             self.current_volume = order_size
 
-            # Execute the order.
+            # Execute order.
             if signal == 'long':
                 self.buy(size=order_size)
                 self.current_direction = 'long'
