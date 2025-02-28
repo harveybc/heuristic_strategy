@@ -2,50 +2,47 @@ import os
 import pandas as pd
 import numpy as np
 from zipline.api import (
-    order_target_percent, record, symbol, set_commission, set_slippage
+    order_target_percent,
+    record,
+    symbol,
+    set_commission,
+    set_slippage
 )
 from zipline import run_algorithm
 from datetime import datetime
 
+
 class Plugin:
     """
     Plugin for Heuristic Trading Strategy using Zipline.
-    
-    La estrategia se compone de:
-      1. APERTURA:
-         - Se analizan las predicciones a corto y largo plazo para obtener:
-             • El valor máximo proyectado (potencial ganancia) y el valor mínimo proyectado (potencial riesgo) 
-               (así como los extremos previos a dichos valores, en la práctica se usan las predicciones diarias).
-         - Se calcula el beneficio potencial (en pips) y el riesgo (en pips) para una orden LONG y para una SHORT.
-         - Se calcula la tasa beneficio/riesgo (RR) y se compara entre ambas señales.
-         - Si el beneficio potencial (de alguna de las dos) supera un umbral mínimo configurable y la RR es la
-           mejor, se abre la posición en esa dirección; además se definen los niveles de Take Profit (TP) y Stop Loss (SL)
-           usando multiplicadores configurables y los extremos obtenidos.
-      
-      2. CIERRE:
-         - Una vez abierta la posición, se monitorea en cada tick (hora) el precio y se consultan ambas predicciones
-           (usando “fallback” si la fecha no coincide exactamente) para evaluar:
-             • Si el precio actual alcanza TP, se cierra la posición.
-             • Si la predicción (corto y/o largo) indica que el precio se moverá de forma adversa (alcanzando el SL)
-               antes de que se cumpla el TP estimado, se cierra la posición de forma anticipada.
-      
-    Los parámetros son configurables y optimizables.
+
+    Esta estrategia se basa en el análisis de predicciones a corto y largo plazo para:
+      1. Calcular el beneficio potencial y el riesgo (en pips) de operar LONG o SHORT,
+         usando los extremos (máximo y mínimo) obtenidos de las predicciones diarias.
+      2. Comparar la tasa beneficio/riesgo (RR) de cada dirección y, si se supera un umbral mínimo,
+         ejecutar la orden en la dirección con mayor RR.
+      3. Una vez abierta la posición, en cada tick (hora) se monitorea el precio junto con las
+         predicciones (tanto horarias como diarias) para cerrar la posición si se alcanza el TP
+         o si se predice que el SL se alcanzará antes del TP (cierre anticipado).
+
+    Los parámetros de la estrategia son configurables y optimizables.
     """
+
     # Parámetros por defecto (optimizables)
     plugin_params = {
         'pip_cost': 0.00001,
-        'rel_volume': 0.02,          # Fracción del cash disponible
+        'rel_volume': 0.02,          # Fracción del cash disponible para la orden
         'min_order_volume': 10000,
         'max_order_volume': 1000000,
         'leverage': 1000,
-        'profit_threshold': 5,       # Umbral mínimo de beneficio potencial (pips)
+        'profit_threshold': 5,       # Mínimo beneficio potencial (pips) para considerar la entrada
         'min_drawdown_pips': 10,
         'tp_multiplier': 0.9,
         'sl_multiplier': 2.0,
         'lower_rr_threshold': 0.5,
         'upper_rr_threshold': 2.0,
         'max_trades_per_5days': 3,
-        'time_horizon': 3            # Número de días para estimar TP (cada día equivale a 24 ticks)
+        'time_horizon': 3            # Horizonte en días para estimar TP (cada día = 24 ticks)
     }
 
     def __init__(self):
@@ -78,14 +75,16 @@ class Plugin:
 
     def evaluate_candidate(self, individual, base_data, hourly_predictions, daily_predictions, config):
         """
-        Evalúa un candidato (parámetros) usando los datasets (base, predicciones horarias y diarias).
+        Evalúa un candidato (parámetros) usando los datasets:
+           - base_data: DataFrame con datos base (con índice datetime).
+           - hourly_predictions y daily_predictions: DataFrames con predicciones.
         Si no se proporcionan archivos de predicción, se auto-generan.
-        Devuelve el profit final y algunos datos de performance.
+        Devuelve el profit final y el performance (en este caso se devuelve el DataFrame de performance).
         """
         import os
         import pandas as pd
 
-        # Desempaquetado: si individual tiene 12 valores se usan todos; si tiene 6 se asumen optimizados
+        # Desempaquetado de parámetros: se acepta candidato de 12 valores o de 6 (usando defaults para los demás).
         if len(individual) == 12:
             pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold, \
             min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
@@ -100,7 +99,7 @@ class Plugin:
         else:
             raise ValueError(f"Expected candidate with 6 or 12 values, got {len(individual)}")
 
-        # Actualizar parámetros
+        # Actualizar parámetros del plugin
         self.params['pip_cost'] = pip_cost
         self.params['rel_volume'] = rel_volume
         self.params['min_order_volume'] = min_order_volume
@@ -114,7 +113,7 @@ class Plugin:
         self.params['upper_rr_threshold'] = upper_rr
         self.params['time_horizon'] = int(time_horizon)
 
-        # Auto-generar predicciones si no se han proporcionado
+        # Si no se han proporcionado archivos de predicción, auto-generarlos
         if (config.get('hourly_predictions_file') is None) and (config.get('daily_predictions_file') is None):
             print(f"[evaluate_candidate] Auto-generating predictions using time_horizon={int(time_horizon)} for candidate {individual}.")
             config["time_horizon"] = int(time_horizon)
@@ -123,7 +122,7 @@ class Plugin:
             hourly_predictions = processed["hourly"]
             daily_predictions = processed["daily"]
 
-        # Fusionar predicciones (se espera que tengan índice datetime)
+        # Fusionar las predicciones (se espera que tengan índice datetime)
         merged_df = pd.DataFrame()
         if hourly_predictions is not None and not hourly_predictions.empty:
             renamed_h = {col: f"Prediction_h_{i+1}" for i, col in enumerate(hourly_predictions.columns)}
@@ -141,29 +140,27 @@ class Plugin:
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # Definir fechas de inicio y fin de la simulación a partir de base_data.
+        # Extraer el rango de fechas de base_data para la simulación
         start_date = base_data.index.min().to_pydatetime()
         end_date = base_data.index.max().to_pydatetime()
 
-        # Función initialize para Zipline.
+        # Definir la función initialize para Zipline
         def initialize(context):
-            context.asset = symbol("A")  # Símbolo ficticio
+            context.asset = symbol("A")  # Usamos un símbolo ficticio
             context.params = self.params.copy()
+            # Guardamos las predicciones en el contexto
             context.hourly_preds = hourly_predictions
             context.daily_preds = daily_predictions
             context.order_active = False
             context.current_signal = None
             context.TP = None
             context.SL = None
-            context.entry_profit = None
-            context.entry_risk = None
-            context.entry_rr = None
             context.last_trade_date = None
             set_commission(commission=0.0)
             set_slippage(slippage=0.0)
             print(f"[ZIPLINE INIT] Simulation from {start_date} to {end_date}.", flush=True)
 
-        # Función handle_data que se ejecuta cada tick (hora)
+        # Definir handle_data: se ejecuta en cada tick (hora)
         def handle_data(context, data):
             current_dt = data.current_dt
             current_price = data.current(context.asset, "price")
@@ -172,7 +169,7 @@ class Plugin:
 
             # Si hay posición activa, evaluar condiciones de salida
             if context.order_active:
-                # Obtener predicciones para current_dt; si no existen, usar la última disponible.
+                # Obtener predicciones para current_dt; si no se encuentra, usar la última fila
                 if current_dt in context.daily_preds.index:
                     row_daily = context.daily_preds.loc[current_dt]
                 else:
@@ -201,15 +198,15 @@ class Plugin:
                         context.order_active = False
                         print("[ZIPLINE DEBUG EXIT - SHORT] Exiting short position.", flush=True)
                         return
-                return  # Mientras haya posición, no se buscan nuevas entradas.
+                return  # Si hay posición, no se buscan nuevas entradas.
 
-            # Si no hay posición, controlar frecuencia de trading.
+            # Control de frecuencia: si la última operación fue hace menos de 5 días, no entrar.
             if context.last_trade_date is not None:
                 if (current_dt - context.last_trade_date).days < 5:
                     print("[ZIPLINE DEBUG ENTRY] Frequency limit active. Skipping entry.", flush=True)
                     return
 
-            # Obtener predicciones para la entrada (usamos daily_preds; fallback a la última fila).
+            # Obtener predicciones para entrada (usamos daily_preds; fallback a última fila)
             if current_dt in context.daily_preds.index:
                 row = context.daily_preds.loc[current_dt]
             else:
@@ -220,14 +217,14 @@ class Plugin:
             max_pred = max(daily_vals)
             min_pred = min(daily_vals)
 
-            # Cálculos para orden LONG.
+            # Cálculos para LONG:
             ideal_profit_long = (max_pred - current_price) / context.params["pip_cost"]
             ideal_drawdown_long = max((current_price - min_pred) / context.params["pip_cost"], context.params["min_drawdown_pips"])
             rr_long = ideal_profit_long / ideal_drawdown_long if ideal_drawdown_long > 0 else 0
             TP_long = current_price + context.params["tp_multiplier"] * ideal_profit_long * context.params["pip_cost"]
             SL_long = current_price - context.params["sl_multiplier"] * ideal_drawdown_long * context.params["pip_cost"]
 
-            # Cálculos para orden SHORT.
+            # Cálculos para SHORT:
             ideal_profit_short = (current_price - min_pred) / context.params["pip_cost"]
             ideal_drawdown_short = max((max_pred - current_price) / context.params["pip_cost"], context.params["min_drawdown_pips"])
             rr_short = ideal_profit_short / ideal_drawdown_short if ideal_drawdown_short > 0 else 0
@@ -253,12 +250,13 @@ class Plugin:
                 chosen_SL = SL_short
                 chosen_RR = rr_short
 
+            # Almacenar métricas de entrada para debug en notify_trade.
             context.entry_profit = ideal_profit_long if signal == "long" else ideal_profit_short
             context.entry_risk = ideal_drawdown_long if signal == "long" else ideal_drawdown_short
             context.entry_rr = chosen_RR
             context.current_signal = signal
 
-            # Cálculo del tamaño de la orden basado en el cash disponible.
+            # Calcular el tamaño de la orden: aquí se usa un enfoque simple basado en el cash disponible.
             current_cash = data.portfolio.cash
             order_size = min(current_cash * context.params["rel_volume"] * context.params["leverage"], context.params["max_order_volume"])
             order_size = max(order_size, context.params["min_order_volume"])
@@ -281,6 +279,7 @@ class Plugin:
             profit = final_balance - 10000.0
             print(f"[ZIPLINE ANALYZE] Final Balance: {final_balance:.2f} | Profit: {profit:.2f}", flush=True)
 
+        # Ejecutar la simulación con run_algorithm
         perf = run_algorithm(
             start=start_date,
             end=end_date,
@@ -292,9 +291,10 @@ class Plugin:
         final_balance = perf['portfolio_value'].iloc[-1]
         profit = final_balance - 10000.0
         print(f"Evaluated candidate {individual} -> Profit: {profit:.2f}", flush=True)
+        # Retornar el profit y el DataFrame de performance (se pueden calcular más métricas fuera)
         return (profit, {"portfolio": perf})
 
-    # Métodos dummy para compatibilidad.
+    # Métodos dummy para compatibilidad con la interfaz del sistema.
     def add_debug_info(self, debug_info):
         debug_info.update(self.get_debug_info())
 
