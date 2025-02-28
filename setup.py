@@ -11,7 +11,7 @@ setup(
         'heuristic_strategy.plugins': [
             'default=app.plugins.plugin_long_short_predictions:Plugin',
             'ls_pred_strategy=app.plugins.plugin_long_short_predictions:Plugin',
-            'zipline=app.plugins.zipline_plugin_long_short_predictions:Plugin'
+            'backtesting=app.plugins.backtesting_plugin_long_short_predictions:Plugin'
         ]
     },
     install_requires=[
