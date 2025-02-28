@@ -136,7 +136,7 @@ class Plugin:
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # Normalize base_data for backtesting.py (required columns: 'Open', 'High', 'Low', 'Close').
+        # Normalize base_data for backtesting.py.
         required_cols = ['Open', 'High', 'Low', 'Close']
         for col in required_cols:
             if col not in base_data.columns and col.upper() in base_data.columns:
@@ -159,16 +159,11 @@ class Plugin:
         # Create and run the backtest.
         bt_sim = Backtest(base_data, self.HeuristicStrategy, cash=10000, commission=0.0, exclusive_orders=True)
         perf = bt_sim.run()
-        # Retrieve final equity: try first 'equity'; if not available, try 'Equity Final'
         try:
             final_balance = perf.equity.iloc[-1]
         except Exception as e:
             print(f"Error accessing final equity via perf.equity: {e}", flush=True)
-            try:
-                final_balance = perf["Equity Final"].iloc[-1]
-            except Exception as e2:
-                print(f"Error accessing final equity via perf['Equity Final']: {e2}", flush=True)
-                final_balance = 10000
+            final_balance = 10000
         profit = final_balance - 10000.0
         print(f"[BACKTEST ANALYZE] Final Balance: {final_balance:.2f} | Profit: {profit:.2f}", flush=True)
         if os.path.exists(temp_pred_file):
@@ -183,9 +178,9 @@ class Plugin:
         Heuristic Trading Strategy.
 
         Entry:
-          - Uses daily predictions (nearest available by forward-fill) to compute potential profit and risk (in pips)
+          - Uses daily predictions (nearest available via forward-fill) to compute potential profit and risk (in pips)
             for both long and short orders.
-          - Compares the risk/reward (RR) ratios and enters a trade if the potential profit exceeds a threshold.
+          - Compares the risk/reward ratios and enters a trade if the potential profit exceeds a threshold.
           - Order volume is computed proportionally between min_order_volume and max_order_volume.
         Exit:
           - On every tick (assumed hourly), if a position is open, it checks:
@@ -193,9 +188,8 @@ class Plugin:
               * For short: if the current price reaches TP or rises above SL.
         """
         def init(self):
-            # Retrieve extra info from the global variable.
             global EXTRA_INFO
-            self.extra = EXTRA_INFO
+            self.extra = EXTRA_INFO  # Retrieve extra info
             self.trade_entry_bar = None
             self.trade_low = None
             self.trade_high = None
@@ -238,21 +232,21 @@ class Plugin:
                         print("[DEBUG EXIT - SHORT] Price above SL. Closing position early.", flush=True)
                         self.position.close()
                         return
-                return  # Do not look for new entries if in a position.
+                return  # If in a position, do not check for new entries.
 
             # Not in a position: update extremes.
             self.trade_low = current_price
             self.trade_high = current_price
 
-            # Retrieve daily predictions using nearest (ffill) lookup.
+            # Retrieve daily predictions using nearest (forward-fill) lookup.
             daily_preds_df = self.extra["daily"]
-            # Find the nearest index less than or equal to dt.
             idx = daily_preds_df.index.get_indexer([dt], method='ffill')
             if idx[0] == -1:
                 row = daily_preds_df.iloc[0]
             else:
                 row = daily_preds_df.iloc[idx[0]]
-            daily_preds = [row[col] for col in row.index if col.startswith("Prediction_d_")]
+            # Use str() conversion for column names.
+            daily_preds = [row[col] for col in row.index if str(col).startswith("Prediction_d_")]
             if not daily_preds:
                 return
             max_pred = max(daily_preds)
@@ -274,7 +268,7 @@ class Plugin:
             tp_sell = current_price - self.extra["params_config"]['tp_multiplier'] * ideal_profit_pips_sell * self.extra["params_config"]['pip_cost']
             sl_sell = current_price + self.extra["params_config"]['sl_multiplier'] * ideal_drawdown_pips_sell * self.extra["params_config"]['pip_cost']
 
-            # Print entry debug info.
+            # Print entry debug information.
             print(f"[DEBUG ENTRY] {dt} | Price: {current_price:.5f}", flush=True)
             print(f"[DEBUG ENTRY - LONG] Profit: {ideal_profit_pips_buy:.2f} pips, Risk: {ideal_drawdown_pips_buy:.2f} pips, RR: {rr_buy:.2f}, TP: {tp_buy:.5f}, SL: {sl_buy:.5f}", flush=True)
             print(f"[DEBUG ENTRY - SHORT] Profit: {ideal_profit_pips_sell:.2f} pips, Risk: {ideal_drawdown_pips_sell:.2f} pips, RR: {rr_sell:.2f}, TP: {tp_sell:.5f}, SL: {sl_sell:.5f}", flush=True)
@@ -304,7 +298,6 @@ class Plugin:
                 print("[DEBUG] Order size <= 0, skipping trade", flush=True)
                 return
 
-            # Mark entry.
             if not hasattr(self, "trade_entry_dates"):
                 self.trade_entry_dates = []
             self.trade_entry_dates.append(dt)
