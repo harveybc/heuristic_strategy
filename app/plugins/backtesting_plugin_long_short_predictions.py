@@ -72,15 +72,12 @@ class Plugin:
         ]
 
     def evaluate_candidate(self, individual, base_data, hourly_predictions, daily_predictions, config):
-        """
-        Evaluates a candidate parameter set using the provided datasets.
-        It updates the plugin parameters and runs a simulation using backtesting.py.
-        """
         import os
         import pandas as pd
         from backtesting import Backtest
 
-        # Desempaquetado: si individual tiene 12 valores se usan todos; si tiene 6 se usan los valores actuales para los no optimizados.
+        # Unpack candidate parameters:
+        # If individual has 12 values, use them all; if it has 6, use the optimized ones and take default for the rest.
         if len(individual) == 12:
             pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold, \
             min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
@@ -95,7 +92,7 @@ class Plugin:
         else:
             raise ValueError(f"Expected candidate with 6 or 12 values, got {len(individual)}")
 
-        # Actualizar parámetros del plugin
+        # Update plugin parameters
         self.params.update({
             'pip_cost': pip_cost,
             'rel_volume': rel_volume,
@@ -111,7 +108,7 @@ class Plugin:
             'time_horizon': int(time_horizon)
         })
 
-        # Auto-generar predicciones si no se han proporcionado.
+        # Auto-generate predictions if none provided.
         if (config.get('hourly_predictions_file') is None) and (config.get('daily_predictions_file') is None):
             print(f"[evaluate_candidate] Auto-generating predictions using time_horizon={int(time_horizon)} for candidate {individual}.")
             from data_processor import process_data
@@ -119,7 +116,7 @@ class Plugin:
             hourly_predictions = processed["hourly"]
             daily_predictions = processed["daily"]
 
-        # Fusionar predicciones en un DataFrame (este archivo se usará internamente por la estrategia).
+        # Merge predictions into one DataFrame.
         merged_df = pd.DataFrame()
         if hourly_predictions is not None and not hourly_predictions.empty:
             renamed_h = {col: f"Prediction_h_{i+1}" for i, col in enumerate(hourly_predictions.columns)}
@@ -136,7 +133,7 @@ class Plugin:
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # Normalizar columnas del DataFrame base para backtesting.py:
+        # Normalize base_data columns required by backtesting.py.
         required_cols = ['Open', 'High', 'Low', 'Close']
         for col in required_cols:
             if col not in base_data.columns and col.upper() in base_data.columns:
@@ -149,17 +146,17 @@ class Plugin:
                 else:
                     raise ValueError(f"Base data must contain '{col}' column.")
 
-        # Asegurarse de que el índice sea DatetimeIndex.
+        # Ensure base_data index is a DatetimeIndex.
         base_data = base_data.copy()
         if not isinstance(base_data.index, pd.DatetimeIndex):
             base_data.index = pd.to_datetime(base_data.index)
 
-        # Adjuntar información extra al DataFrame base (usando setattr, ya que no se pueden agregar columnas arbitrarias)
+        # Prepare extra info to pass to the strategy.
         extra = {"hourly": hourly_predictions, "daily": daily_predictions, "params_config": self.params}
-        setattr(base_data, "extra", extra)
 
-        # Crear y correr la simulación con backtesting.py
+        # Instead of attaching extra to base_data (which backtesting.py does not support), we attach it to the Backtest instance.
         bt_sim = Backtest(base_data, self.HeuristicStrategy, cash=10000, commission=0.0, exclusive_orders=True)
+        bt_sim.extra = extra  # <-- Store extra info in the Backtest instance
         perf = bt_sim.run()
         final_balance = perf["Equity"].iloc[-1]
         profit = final_balance - 10000.0
@@ -167,6 +164,7 @@ class Plugin:
         if os.path.exists(temp_pred_file):
             os.remove(temp_pred_file)
         return (profit, {"portfolio": perf})
+
 
     # -------------------------------------------------------------------------
     # Strategy Implementation using backtesting.py
@@ -176,25 +174,23 @@ class Plugin:
         Heuristic Trading Strategy.
         
         Entry:
-          - Uses short-term (hourly) and long-term (daily) predictions to compute:
-              • Profit potential for long: (max_daily - current_price) / pip_cost.
-              • Risk for long: max( (current_price - min_daily) / pip_cost, min_drawdown_pips ).
-              • Profit potential for short: (current_price - min_daily) / pip_cost.
-              • Risk for short: max( (max_daily - current_price) / pip_cost, min_drawdown_pips ).
-          - Compares profit/risk (RR) of long and short; enters la operación (long o short) con mejor RR siempre
-            que el potencial de ganancia supere un umbral configurable.
-          - El volumen de la orden se determina de forma proporcional, con límites mínimos y máximos.
+        - Uses short-term (hourly) and long-term (daily) predictions to compute:
+            • Profit potential for long: (max_daily - current_price) / pip_cost.
+            • Risk for long: max( (current_price - min_daily) / pip_cost, min_drawdown_pips ).
+            • Profit potential for short: (current_price - min_daily) / pip_cost.
+            • Risk for short: max( (max_daily - current_price) / pip_cost, min_drawdown_pips ).
+        - Compares profit/risk (RR) of long and short; enters the trade (long or short) with the better RR if the profit exceeds a threshold.
+        - Order volume is set proportionally between min_order_volume and max_order_volume.
         
         Exit:
-          - Monitorea en cada tick (hora) el comportamiento del mercado.
-          - Para una posición long: cierra si el precio alcanza TP o si las predicciones (corto y largo) indican que
-            se ha alcanzado (o se aproxima a) SL.
-          - Para una posición short: cierra si el precio alcanza TP o si las predicciones indican que se ha alcanzado (o se
-            aproxima a) SL.
+        - At each tick (assumed hourly), monitors market behavior.
+        - For a long position: closes if price reaches TP or if the predictions (from daily data) indicate that SL would be hit.
+        - For a short position: closes if price reaches TP or if predictions indicate that SL would be hit.
         """
         def init(self):
-            # Inicializar variables de seguimiento
-            self.trade_entry_date = None
+            # Retrieve extra information passed from Backtest (attached to bt_sim.extra)
+            self.extra = self.bt.extra  # Contains 'hourly', 'daily', and 'params_config'
+            # Initialize trade tracking variables.
             self.trade_entry_bar = None
             self.trade_low = None
             self.trade_high = None
@@ -202,28 +198,23 @@ class Plugin:
             self.entry_risk = None
             self.entry_rr = None
             self.entry_signal = None
+            # Store the order entry price (will be set in notify_order below).
+            self.order_entry_price = None
 
         def next(self):
-            # Se asume que self.data.Close, self.data.Open, etc. están disponibles.
+            # Get current price and datetime.
             current_price = self.data.Close[-1]
             dt = self.data.index[-1]
 
-            # Registrar balance (usando el valor de la cartera de backtesting.py)
-            # Nota: backtesting.py almacena la serie "Equity" en perf; para debug se podría usar self.equity.
-            # Aquí no se registra balance manualmente.
-
-            # Si hay posición abierta, evaluar condiciones de salida:
+            # If a position is open, evaluate exit conditions.
             if self.position:
                 if self.entry_signal == 'long':
-                    # Actualizar el mínimo alcanzado durante la operación
                     if (self.trade_low is None) or (current_price < self.trade_low):
                         self.trade_low = current_price
-                    # Si el precio alcanza el TP o el mínimo predicho (calculado a partir de la información extra)
-                    # se cierra la posición.
+                    # For exit we use a simplified approach: if price reaches TP or falls below SL, exit.
                     if current_price >= self.current_tp:
                         self.position.close()
                         return
-                    # Para simplificar, si el valor de "Close" es menor al SL calculado, se cierra.
                     if current_price < self.current_sl:
                         self.position.close()
                         return
@@ -236,51 +227,47 @@ class Plugin:
                     if current_price > self.current_sl:
                         self.position.close()
                         return
-                return  # Si hay posición abierta, no se buscan nuevas entradas.
+                return  # Do not attempt new entries if a position is open.
 
-            # Sin posición: reiniciar extremos.
+            # No position open: update extremes.
             self.trade_low = current_price
             self.trade_high = current_price
 
-            # Obtener las predicciones del DataFrame extra (almacenado en base_data.extra)
-            # Se espera que extra tenga claves "hourly" y "daily"
-            extra = self.data.extra  # Obtenido desde base_data.extra (adjunto con setattr)
-            # Para este ejemplo, usamos únicamente las predicciones diarias para determinar extremos.
-            # Se espera que las predicciones diarias sean un DataFrame indexado por DATE_TIME.
-            # Buscamos la fila correspondiente a la fecha actual (o la más reciente).
+            # Get the extra prediction info (we use the daily predictions for entry extremes)
+            extra = self.extra  # Dictionary with keys "daily" and "hourly"
+            daily_preds_df = extra["daily"]
+            # Try to locate the row corresponding to the current datetime; if not found, use the last row.
             try:
-                row = extra["daily"].loc[dt]
+                row = daily_preds_df.loc[dt]
             except KeyError:
-                # Si no se encuentra la fecha, usar la última fila disponible.
-                row = extra["daily"].iloc[-1]
-            # Convertir las predicciones en una lista de números.
+                row = daily_preds_df.iloc[-1]
+            # Extract all daily prediction values from columns that start with "Prediction_d_"
             daily_preds = [row[col] for col in row.index if col.startswith("Prediction_d_")]
             if not daily_preds:
                 return
-
             max_pred = max(daily_preds)
             min_pred = min(daily_preds)
 
-            # Calcular condiciones para orden LONG.
+            # Calculate entry conditions for LONG.
             ideal_profit_pips_buy = (max_pred - current_price) / self.params.pip_cost
             ideal_drawdown_pips_buy = max((current_price - min_pred) / self.params.pip_cost, self.params.min_drawdown_pips)
             rr_buy = ideal_profit_pips_buy / ideal_drawdown_pips_buy if ideal_drawdown_pips_buy > 0 else 0
             tp_buy = current_price + self.params.tp_multiplier * ideal_profit_pips_buy * self.params.pip_cost
             sl_buy = current_price - self.params.sl_multiplier * ideal_drawdown_pips_buy * self.params.pip_cost
 
-            # Calcular condiciones para orden SHORT.
+            # Calculate entry conditions for SHORT.
             ideal_profit_pips_sell = (current_price - min_pred) / self.params.pip_cost
             ideal_drawdown_pips_sell = max((max_pred - current_price) / self.params.pip_cost, self.params.min_drawdown_pips)
             rr_sell = ideal_profit_pips_sell / ideal_drawdown_pips_sell if ideal_drawdown_pips_sell > 0 else 0
             tp_sell = current_price - self.params.tp_multiplier * ideal_profit_pips_sell * self.params.pip_cost
             sl_sell = current_price + self.params.sl_multiplier * ideal_drawdown_pips_sell * self.params.pip_cost
 
-            # Imprimir métricas de entrada para debug.
+            # Print entry debug information.
             print(f"[DEBUG ENTRY] {dt} | Current Price: {current_price:.5f}", flush=True)
             print(f"[DEBUG ENTRY - LONG] Profit: {ideal_profit_pips_buy:.2f} pips, Risk: {ideal_drawdown_pips_buy:.2f} pips, RR: {rr_buy:.2f}, TP: {tp_buy:.5f}, SL: {sl_buy:.5f}", flush=True)
             print(f"[DEBUG ENTRY - SHORT] Profit: {ideal_profit_pips_sell:.2f} pips, Risk: {ideal_drawdown_pips_sell:.2f} pips, RR: {rr_sell:.2f}, TP: {tp_sell:.5f}, SL: {sl_sell:.5f}", flush=True)
 
-            # Determinar la señal (entrada long o short) según cuál tenga mayor RR y supere el profit_threshold.
+            # Determine which side to enter.
             if (ideal_profit_pips_buy >= self.params.profit_threshold) and (rr_buy >= rr_sell):
                 signal = 'long'
                 self.current_tp = tp_buy
@@ -290,22 +277,23 @@ class Plugin:
                 self.current_tp = tp_sell
                 self.current_sl = sl_sell
             else:
-                return  # No se cumple la condición mínima de ganancia.
+                return  # Do not enter trade if minimum profit condition is not met.
 
-            # Almacenar métricas de entrada para debug en salida de trade.
+            # Store entry metrics for later debug in trade exit.
             self.entry_profit = ideal_profit_pips_buy if signal == 'long' else ideal_profit_pips_sell
             self.entry_risk = ideal_drawdown_pips_buy if signal == 'long' else ideal_drawdown_pips_sell
             self.entry_rr = rr_buy if signal == 'long' else rr_sell
             self.entry_signal = signal
 
-            # Calcular el tamaño de la orden.
-            # Se usa una función de asignación proporcional según RR (usando min_order_volume y max_order_volume).
+            # Calculate order size (proportional allocation between min and max order volumes)
             order_size = self.compute_size(self.entry_rr)
             if order_size <= 0:
                 print("[DEBUG] Order size <= 0, skipping trade", flush=True)
                 return
 
-            # Ejecutar la orden.
+            # Record the entry bar for later duration calculation.
+            self.trade_entry_bar = len(self)
+            # Execute the order.
             if signal == 'long':
                 self.buy(size=order_size)
                 print(f"[DEBUG ENTRY] LONG order executed. Order Size: {order_size}", flush=True)
@@ -321,18 +309,22 @@ class Plugin:
             elif rr <= self.params.lower_rr_threshold:
                 size = min_vol
             else:
-                size = min_vol + ((rr - self.params.lower_rr_threshold) / 
-                                  (self.params.upper_rr_threshold - self.params.lower_rr_threshold)) * (max_vol - min_vol)
+                size = min_vol + ((rr - self.params.lower_rr_threshold) /
+                                (self.params.upper_rr_threshold - self.params.lower_rr_threshold)) * (max_vol - min_vol)
             cash = self.broker.cash
             max_from_cash = cash * self.params.rel_volume * self.params.leverage
             return min(size, max_from_cash)
 
+        def notify_order(self, order):
+            if order.status == order.Completed:
+                self.order_entry_price = order.executed.price
+
         def on_trade(self, trade):
-            # Se llama cuando se cierra un trade.
+            # Called when a trade is closed.
             if trade.isclosed:
-                duration = len(self) - (self.trade_entry_bar if hasattr(self, "trade_entry_bar") else 0)
+                duration = len(self) - (self.trade_entry_bar if self.trade_entry_bar is not None else 0)
                 dt = self.data.index[-1]
-                entry_price = self.order_entry_price if hasattr(self, "order_entry_price") and self.order_entry_price is not None else 0
+                entry_price = self.order_entry_price if self.order_entry_price is not None else 0
                 exit_price = trade.price
                 profit_usd = trade.pnl
                 direction = self.entry_signal
@@ -346,11 +338,11 @@ class Plugin:
                     profit_pips = 0
                     intra_dd = 0
                 print(f"[DEBUG TRADE ENTRY] Signal: {self.entry_signal} | Entry Profit (pips): {self.entry_profit:.2f} | "
-                      f"Entry Risk (pips): {self.entry_risk:.2f} | Entry RR: {self.entry_rr:.2f}", flush=True)
+                    f"Entry Risk (pips): {self.entry_risk:.2f} | Entry RR: {self.entry_rr:.2f}", flush=True)
                 print(f"[DEBUG TRADE CLOSED] ({direction}): Date={dt}, Entry={entry_price:.5f}, Exit={exit_price:.5f}, "
-                      f"Profit (USD)={profit_usd:.2f}, Pips={profit_pips:.2f}, Duration={duration} bars, MaxDD={intra_dd:.2f}, "
-                      f"Balance={self.broker.equity:.2f}", flush=True)
-                # Reset variables for the next trade.
+                    f"Profit (USD)={profit_usd:.2f}, Pips={profit_pips:.2f}, Duration={duration} bars, MaxDD={intra_dd:.2f}, "
+                    f"Balance={self.broker.equity:.2f}", flush=True)
+                # Reset trade-specific variables.
                 self.order_entry_price = None
                 self.current_tp = None
                 self.current_sl = None
