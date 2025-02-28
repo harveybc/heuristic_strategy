@@ -4,24 +4,20 @@ import pandas as pd
 import numpy as np
 from backtesting import Backtest, Strategy
 
+# Global variable to hold extra info for the strategy.
+EXTRA_INFO = None
+
 class Plugin:
     """
-    Plugin for Heuristic Trading Strategy.
+    Plugin for Heuristic Trading Strategy using backtesting.py.
 
-    - Implements a heuristic trading strategy with configurable parameters.
-    - The strategy uses short-term (hourly) and long-term (daily) predictions to:
-        1. Calculate potential profit and risk for both long and short orders.
-        2. Compare their profit/risk ratios and only enter a trade if the ratio exceeds
-           a configurable threshold.
-        3. Set TP (Take Profit) and SL (Stop Loss) levels based on the extremes found in the long-term predictions.
-        4. Continuously monitor the market (each tick, assumed hourly) and exit the trade if:
-           - For a long: the price reaches TP, or if the predicted minimum (from short+long) falls below SL.
-           - For a short: the price reaches TP, or if the predicted maximum rises above SL.
-    - Designed to operate one order at a time.
-    - The parameters are intended to be optimized (using a genetic algorithm, for example).
+    - Implements a heuristic trading strategy based on short-term (hourly) and long-term (daily) predictions.
+    - The strategy compares profit/risk ratios for long and short entries and only enters if the profit potential exceeds a threshold.
+    - Exit conditions are based on reaching take profit or stop loss.
+    - The strategy operates one order at a time.
+    - Parameters are configurable and optimizable.
     """
-
-    # Default plugin parameters (for optimizer integration)
+    # Default plugin parameters (must be present for optimizer integration)
     plugin_params = {
         'pip_cost': 0.00001,
         'rel_volume': 0.02,         # Maximum 2% of available balance
@@ -34,7 +30,7 @@ class Plugin:
         'sl_multiplier': 2.0,
         'lower_rr_threshold': 0.5,
         'upper_rr_threshold': 2.0,
-        'time_horizon': 3           # In days; used to compute expected TP tick (3 days = 72 ticks)
+        'time_horizon': 3           # In days (used for expected TP tick, e.g. 3 days = 72 ticks)
     }
 
     def __init__(self):
@@ -77,11 +73,12 @@ class Plugin:
         from backtesting import Backtest
 
         # Unpack candidate parameters:
+        # If candidate has 12 values, use all; if 6, then use defaults for the others.
         if len(individual) == 12:
-            pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold, \
-            min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
+            (pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold,
+             min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon) = individual
         elif len(individual) == 6:
-            profit_threshold, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
+            (profit_threshold, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon) = individual
             pip_cost = self.params['pip_cost']
             rel_volume = self.params['rel_volume']
             min_order_volume = self.params['min_order_volume']
@@ -144,16 +141,17 @@ class Plugin:
                     base_data[col] = base_data['Close']
                 else:
                     raise ValueError(f"Base data must contain '{col}' column.")
-
         if not isinstance(base_data.index, pd.DatetimeIndex):
             base_data.index = pd.to_datetime(base_data.index)
         base_data = base_data.copy()
 
-        # Prepare extra info to pass to the strategy.
+        # Instead of attaching extra info to base_data, store it in a global variable.
+        global EXTRA_INFO
         extra = {"hourly": hourly_predictions, "daily": daily_predictions, "params_config": self.params}
+        EXTRA_INFO = extra
 
-        # Create and run the Backtest; pass extra info via a keyword argument.
-        bt_sim = Backtest(base_data, self.HeuristicStrategy, cash=10000, commission=0.0, exclusive_orders=True, extra=extra)
+        # Create and run the Backtest.
+        bt_sim = Backtest(base_data, self.HeuristicStrategy, cash=10000, commission=0.0, exclusive_orders=True)
         perf = bt_sim.run()
         final_balance = perf["Equity"].iloc[-1]
         profit = final_balance - 10000.0
@@ -161,7 +159,6 @@ class Plugin:
         if os.path.exists(temp_pred_file):
             os.remove(temp_pred_file)
         return (profit, {"portfolio": perf})
-
 
     # -------------------------------------------------------------------------
     # Strategy Implementation using backtesting.py
@@ -171,20 +168,20 @@ class Plugin:
         Heuristic Trading Strategy.
 
         Entry:
-        - Uses short-term (hourly) and long-term (daily) predictions to compute potential profit and risk.
-        - Compares profit/risk (RR) for long vs. short and enters the trade with the better RR if profit exceeds a threshold.
-        - Order volume is proportional between min_order_volume and max_order_volume.
+          - Computes potential profit and risk for long and short orders using short- and long-term predictions.
+          - Compares profit/risk (RR) for long vs. short; if the potential profit exceeds a threshold,
+            enters the trade (long if RR_long >= RR_short, else short).
+          - Order volume is computed proportionally between min_order_volume and max_order_volume.
         Exit:
-        - At each tick (assumed hourly), monitors market behavior.
-        - For a long position: exits if price reaches TP or falls below SL.
-        - For a short position: exits if price reaches TP or rises above SL.
+          - At each tick (hour), if a position is open, the strategy checks if:
+              * For long: the current price has reached TP or fallen below SL.
+              * For short: the current price has reached TP or risen above SL.
         """
-
-        def __init__(self, data, extra=None, **kwargs):
-            # Receive extra info from Backtest (passed as extra=extra)
+        def __init__(self, data, **kwargs):
             super().__init__(data, **kwargs)
-            self.extra = extra  # Contains 'hourly', 'daily', and 'params_config'
-            # Initialize trade tracking variables.
+            # Instead of reading extra from data (which is not allowed), get it from global EXTRA_INFO.
+            global EXTRA_INFO
+            self.extra = EXTRA_INFO
             self.trade_entry_bar = None
             self.trade_low = None
             self.trade_high = None
@@ -193,43 +190,46 @@ class Plugin:
             self.entry_rr = None
             self.entry_signal = None
             self.order_entry_price = None
-
-        def init(self):
-            # Additional initialization if needed.
-            pass
+            self.current_tp = None
+            self.current_sl = None
+            self.current_direction = None
 
         def next(self):
-            # Get current price and time.
             current_price = self.data.Close[-1]
             dt = self.data.index[-1]
 
-            # If a position is open, evaluate exit conditions.
+            # If a position is open, check exit conditions.
             if self.position:
                 if self.entry_signal == 'long':
                     if (self.trade_low is None) or (current_price < self.trade_low):
                         self.trade_low = current_price
+                    print(f"[DEBUG EXIT - LONG] {dt} | Current Price: {current_price:.5f} | TP: {self.current_tp:.5f} | SL: {self.current_sl:.5f}", flush=True)
                     if current_price >= self.current_tp:
+                        print("[DEBUG EXIT - LONG] TP reached. Closing position.", flush=True)
                         self.position.close()
                         return
                     if current_price < self.current_sl:
+                        print("[DEBUG EXIT - LONG] Price below SL. Closing position early.", flush=True)
                         self.position.close()
                         return
                 elif self.entry_signal == 'short':
                     if (self.trade_high is None) or (current_price > self.trade_high):
                         self.trade_high = current_price
+                    print(f"[DEBUG EXIT - SHORT] {dt} | Current Price: {current_price:.5f} | TP: {self.current_tp:.5f} | SL: {self.current_sl:.5f}", flush=True)
                     if current_price <= self.current_tp:
+                        print("[DEBUG EXIT - SHORT] TP reached. Closing position.", flush=True)
                         self.position.close()
                         return
                     if current_price > self.current_sl:
+                        print("[DEBUG EXIT - SHORT] Price above SL. Closing position early.", flush=True)
                         self.position.close()
                         return
-                return  # Do not seek new entries if in position.
-
+                return  # Do not check for new entries if a position is open.
             # No open position: update extremes.
             self.trade_low = current_price
             self.trade_high = current_price
 
-            # Retrieve extra prediction info (using daily predictions for entry conditions).
+            # Retrieve daily predictions from extra info.
             daily_preds_df = self.extra["daily"]
             try:
                 row = daily_preds_df.loc[dt]
@@ -255,12 +255,12 @@ class Plugin:
             tp_sell = current_price - self.params.tp_multiplier * ideal_profit_pips_sell * self.params.pip_cost
             sl_sell = current_price + self.params.sl_multiplier * ideal_drawdown_pips_sell * self.params.pip_cost
 
-            # Print debug entry information.
+            # Print entry debug information.
             print(f"[DEBUG ENTRY] {dt} | Current Price: {current_price:.5f}", flush=True)
             print(f"[DEBUG ENTRY - LONG] Profit: {ideal_profit_pips_buy:.2f} pips, Risk: {ideal_drawdown_pips_buy:.2f} pips, RR: {rr_buy:.2f}, TP: {tp_buy:.5f}, SL: {sl_buy:.5f}", flush=True)
             print(f"[DEBUG ENTRY - SHORT] Profit: {ideal_profit_pips_sell:.2f} pips, Risk: {ideal_drawdown_pips_sell:.2f} pips, RR: {rr_sell:.2f}, TP: {tp_sell:.5f}, SL: {sl_sell:.5f}", flush=True)
 
-            # Determine signal.
+            # Determine which signal to take.
             if (ideal_profit_pips_buy >= self.params.profit_threshold) and (rr_buy >= rr_sell):
                 signal = 'long'
                 self.current_tp = tp_buy
@@ -270,9 +270,10 @@ class Plugin:
                 self.current_tp = tp_sell
                 self.current_sl = sl_sell
             else:
+                print("[DEBUG ENTRY] Profit threshold condition not met for either signal.", flush=True)
                 return
 
-            # Store entry metrics for later debug.
+            # Store entry metrics for later debugging.
             self.entry_profit = ideal_profit_pips_buy if signal == 'long' else ideal_profit_pips_sell
             self.entry_risk = ideal_drawdown_pips_buy if signal == 'long' else ideal_drawdown_pips_sell
             self.entry_rr = rr_buy if signal == 'long' else rr_sell
@@ -284,14 +285,17 @@ class Plugin:
                 print("[DEBUG] Order size <= 0, skipping trade", flush=True)
                 return
 
-            # Record the entry bar.
+            self.trade_entry_dates.append(dt)
             self.trade_entry_bar = len(self)
-            # Execute order.
+            self.current_volume = order_size
+
             if signal == 'long':
                 self.buy(size=order_size)
+                self.current_direction = 'long'
                 print(f"[DEBUG ENTRY] LONG order executed. Order Size: {order_size}", flush=True)
             elif signal == 'short':
                 self.sell(size=order_size)
+                self.current_direction = 'short'
                 print(f"[DEBUG ENTRY] SHORT order executed. Order Size: {order_size}", flush=True)
 
         def compute_size(self, rr):
@@ -303,7 +307,7 @@ class Plugin:
                 size = min_vol
             else:
                 size = min_vol + ((rr - self.params.lower_rr_threshold) /
-                                (self.params.upper_rr_threshold - self.params.lower_rr_threshold)) * (max_vol - min_vol)
+                                  (self.params.upper_rr_threshold - self.params.lower_rr_threshold)) * (max_vol - min_vol)
             cash = self.broker.cash
             max_from_cash = cash * self.params.rel_volume * self.params.leverage
             return min(size, max_from_cash)
@@ -330,16 +334,45 @@ class Plugin:
                     profit_pips = 0
                     intra_dd = 0
                 print(f"[DEBUG TRADE ENTRY] Signal: {self.entry_signal} | Entry Profit (pips): {self.entry_profit:.2f} | "
-                    f"Entry Risk (pips): {self.entry_risk:.2f} | Entry RR: {self.entry_rr:.2f}", flush=True)
+                      f"Entry Risk (pips): {self.entry_risk:.2f} | Entry RR: {self.entry_rr:.2f}", flush=True)
                 print(f"[DEBUG TRADE CLOSED] ({direction}): Date={dt}, Entry={entry_price:.5f}, Exit={exit_price:.5f}, "
-                    f"Profit (USD)={profit_usd:.2f}, Pips={profit_pips:.2f}, Duration={duration} bars, MaxDD={intra_dd:.2f}, "
-                    f"Balance={self.broker.equity:.2f}", flush=True)
-                # Reset trade-specific variables.
+                      f"Profit (USD)={profit_usd:.2f}, Pips={profit_pips:.2f}, Duration={duration} bars, MaxDD={intra_dd:.2f}, "
+                      f"Balance={self.broker.equity:.2f}", flush=True)
                 self.order_entry_price = None
                 self.current_tp = None
                 self.current_sl = None
+                self.current_direction = None
                 self.entry_signal = None
 
+        def stop(self):
+            n_trades = 0
+            if hasattr(self, 'trades') and self.trades:
+                n_trades = len(self.trades)
+            if n_trades > 0:
+                avg_profit_usd = sum(t['pnl'] for t in self.trades) / n_trades
+                avg_profit_pips = sum(t['pips'] for t in self.trades) / n_trades
+                avg_duration = sum(t['duration'] for t in self.trades) / n_trades
+                avg_max_dd = sum(t['max_dd'] for t in self.trades) / n_trades
+            else:
+                avg_profit_usd = avg_profit_pips = avg_duration = avg_max_dd = 0
+            final_balance = self.broker.equity
+            print("\n==== Summary ====")
+            print(f"Initial Balance (USD): {self.initial_balance:.2f}")
+            print(f"Final Balance (USD):   {final_balance:.2f}")
+            print(f"Number of Trades: {n_trades}")
+            print(f"Average Profit (USD): {avg_profit_usd:.2f}")
+            print(f"Average Profit (pips): {avg_profit_pips:.2f}")
+            print(f"Average Max Drawdown (pips): {avg_max_dd:.2f}")
+            print(f"Average Trade Duration (bars): {avg_duration:.2f}")
+            import matplotlib.pyplot as plt
+            plt.figure(figsize=(10, 5))
+            plt.plot(self.date_history, self.balance_history, label="Balance")
+            plt.xlabel("Date")
+            plt.ylabel("Balance (USD)")
+            plt.title("Balance vs Date")
+            plt.legend()
+            plt.savefig("balance_plot.png")
+            plt.close()
 
     # -------------------------------------------------------------------------
     # Dummy methods for interface compatibility
