@@ -433,12 +433,17 @@ class Plugin:
 
         def notify_trade(self, trade):
             if trade.isclosed:
+                # Calculate trade duration (in bars)
                 duration = len(self) - (self.trade_entry_bar if self.trade_entry_bar is not None else 0)
+                # Get current datetime
                 dt = self.data0.datetime.datetime(0)
+                # Get entry price (if not set, use 0)
                 entry_price = self.order_entry_price if self.order_entry_price is not None else 0
                 exit_price = trade.price
                 profit_usd = trade.pnlcomm
                 direction = self.order_direction
+
+                # Calculate trade profit in pips and maximum drawdown
                 if direction == 'long':
                     profit_pips = (exit_price - entry_price) / self.p.pip_cost
                     intra_dd = (entry_price - self.trade_low) / self.p.pip_cost if self.trade_low is not None else 0
@@ -448,20 +453,31 @@ class Plugin:
                 else:
                     profit_pips = 0
                     intra_dd = 0
+
                 current_balance = self.broker.getvalue()
                 open_dt = self.trade_entry_dates[-1] if self.trade_entry_dates else "N/A"
-                # Print stored entry metrics along with the trade closed message.
-                print(f"[DEBUG TRADE ENTRY] Signal: {self.entry_signal} | Entry Profit (pips): {self.entry_profit:.2f} | "
-                    f"Entry Risk (pips): {self.entry_risk:.2f} | Entry RR: {self.entry_rr:.2f}", flush=True)
-                print(f"[DEBUG] TRADE CLOSED ({direction}): Date={dt}, Entry={entry_price:.5f}, Exit={exit_price:.5f}, "
+
+                # Print the stored entry metrics for debugging.
+                # These were stored in next() at order entry.
+                print(f"[DEBUG TRADE ENTRY] Signal: {self.entry_signal} | "
+                    f"Entry Profit (pips): {self.entry_profit:.2f} | "
+                    f"Entry Risk (pips): {self.entry_risk:.2f} | "
+                    f"Entry RR: {self.entry_rr:.2f}", flush=True)
+
+                # Print trade closed details along with the entry metrics.
+                print(f"[DEBUG TRADE CLOSED] ({direction}): Date={dt}, Entry={entry_price:.5f}, Exit={exit_price:.5f}, "
                     f"Volume={self.current_volume if hasattr(self, 'current_volume') and self.current_volume is not None else 0}, "
                     f"PnL={profit_usd:.2f}, Pips={profit_pips:.2f}, Duration={duration} bars, MaxDD={intra_dd:.2f}, "
                     f"Balance={current_balance:.2f}", flush=True)
+
+                # Reset trade-specific variables.
                 self.order_entry_price = None
                 self.current_tp = None
                 self.current_sl = None
                 self.current_direction = None
                 self.current_volume = None
+
+
 
         def stop(self):
             if self.position:
