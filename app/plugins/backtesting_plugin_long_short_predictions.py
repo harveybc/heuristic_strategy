@@ -4,20 +4,22 @@ import pandas as pd
 import numpy as np
 from backtesting import Backtest, Strategy
 
-# Global variable to hold extra info for the strategy.
+# Global variable to hold extra info (predictions and parameters)
 EXTRA_INFO = None
 
 class Plugin:
     """
     Plugin for Heuristic Trading Strategy using backtesting.py.
 
-    - Implements a heuristic trading strategy based on short-term (hourly) and long-term (daily) predictions.
-    - The strategy compares profit/risk ratios for long and short entries and only enters if the profit potential exceeds a threshold.
-    - Exit conditions are based on reaching take profit or stop loss.
-    - The strategy operates one order at a time.
-    - Parameters are configurable and optimizable.
+    This strategy uses short- and long-term predictions to calculate the profit potential and risk for long and short orders.
+    It compares the profit/risk ratio for each side and enters the trade (only one open position at a time)
+    only if the potential profit exceeds a configurable threshold. Exit conditions are checked each tick (assumed hourly):
+      - For long positions: close if the price reaches the Take Profit or falls below the Stop Loss.
+      - For short positions: close if the price reaches the Take Profit or rises above the Stop Loss.
+    All parameters are configurable and meant to be optimized.
     """
-    # Default plugin parameters (must be present for optimizer integration)
+
+    # Default plugin parameters (for optimizer integration)
     plugin_params = {
         'pip_cost': 0.00001,
         'rel_volume': 0.02,         # Maximum 2% of available balance
@@ -30,7 +32,7 @@ class Plugin:
         'sl_multiplier': 2.0,
         'lower_rr_threshold': 0.5,
         'upper_rr_threshold': 2.0,
-        'time_horizon': 3           # In days (used for expected TP tick, e.g. 3 days = 72 ticks)
+        'time_horizon': 3           # In days (e.g. 3 days = 72 ticks)
     }
 
     def __init__(self):
@@ -68,12 +70,16 @@ class Plugin:
         ]
 
     def evaluate_candidate(self, individual, base_data, hourly_predictions, daily_predictions, config):
+        """
+        Evaluates a candidate parameter set using the provided datasets.
+        Updates the plugin parameters, prepares predictions, normalizes base_data, and runs the simulation.
+        """
         import os
         import pandas as pd
         from backtesting import Backtest
 
-        # Unpack candidate parameters:
-        # If candidate has 12 values, use all; if 6, then use defaults for the others.
+        # Unpack candidate parameters.
+        # If candidate has 12 values, use all; if 6, use defaults for the others.
         if len(individual) == 12:
             (pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold,
              min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon) = individual
@@ -112,7 +118,7 @@ class Plugin:
             hourly_predictions = processed["hourly"]
             daily_predictions = processed["daily"]
 
-        # Merge predictions.
+        # Merge predictions into one DataFrame.
         merged_df = pd.DataFrame()
         if hourly_predictions is not None and not hourly_predictions.empty:
             renamed_h = {col: f"Prediction_h_{i+1}" for i, col in enumerate(hourly_predictions.columns)}
@@ -129,7 +135,7 @@ class Plugin:
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # Normalize base_data columns for backtesting.py.
+        # Normalize base_data columns so that they include 'Open', 'High', 'Low', and 'Close'.
         required_cols = ['Open', 'High', 'Low', 'Close']
         for col in required_cols:
             if col not in base_data.columns and col.upper() in base_data.columns:
@@ -137,20 +143,20 @@ class Plugin:
         for col in required_cols:
             if col not in base_data.columns:
                 if col != 'Close' and 'Close' in base_data.columns:
-                    print(f"[evaluate_candidate] Column '{col}' missing. Creating it using 'Close'.", flush=True)
+                    print(f"[evaluate_candidate] Column '{col}' missing. Creating it using 'Close'.")
                     base_data[col] = base_data['Close']
                 else:
                     raise ValueError(f"Base data must contain '{col}' column.")
+
         if not isinstance(base_data.index, pd.DatetimeIndex):
             base_data.index = pd.to_datetime(base_data.index)
         base_data = base_data.copy()
 
-        # Instead of attaching extra info to base_data, store it in a global variable.
+        # Store extra info (predictions and parameters) in a global variable.
         global EXTRA_INFO
-        extra = {"hourly": hourly_predictions, "daily": daily_predictions, "params_config": self.params}
-        EXTRA_INFO = extra
+        EXTRA_INFO = {"hourly": hourly_predictions, "daily": daily_predictions, "params_config": self.params}
 
-        # Create and run the Backtest.
+        # Create and run the Backtest (note: we do not pass extra info via Backtest; our strategy accesses the global EXTRA_INFO).
         bt_sim = Backtest(base_data, self.HeuristicStrategy, cash=10000, commission=0.0, exclusive_orders=True)
         perf = bt_sim.run()
         final_balance = perf["Equity"].iloc[-1]
@@ -166,22 +172,20 @@ class Plugin:
     class HeuristicStrategy(Strategy):
         """
         Heuristic Trading Strategy.
-
+        
         Entry:
           - Computes potential profit and risk for long and short orders using short- and long-term predictions.
-          - Compares profit/risk (RR) for long vs. short; if the potential profit exceeds a threshold,
-            enters the trade (long if RR_long >= RR_short, else short).
-          - Order volume is computed proportionally between min_order_volume and max_order_volume.
+          - Compares profit/risk ratios; if the potential profit (in pips) exceeds a threshold,
+            enters a trade (long if RR_long >= RR_short, else short).
+          - Order size is computed proportionally between min_order_volume and max_order_volume.
+        
         Exit:
-          - At each tick (hour), if a position is open, the strategy checks if:
-              * For long: the current price has reached TP or fallen below SL.
-              * For short: the current price has reached TP or risen above SL.
+          - At each tick (assumed hourly), if a position is open, checks if the current price has reached the TP or breached the SL.
         """
-        def __init__(self, data, **kwargs):
-            super().__init__(data, **kwargs)
-            # Instead of reading extra from data (which is not allowed), get it from global EXTRA_INFO.
+        def init(self):
+            # In backtesting.py, use init() rather than __init__
             global EXTRA_INFO
-            self.extra = EXTRA_INFO
+            self.extra = EXTRA_INFO  # extra info with predictions and config
             self.trade_entry_bar = None
             self.trade_low = None
             self.trade_high = None
@@ -198,10 +202,10 @@ class Plugin:
             current_price = self.data.Close[-1]
             dt = self.data.index[-1]
 
-            # If a position is open, check exit conditions.
+            # If a position is open, evaluate exit conditions.
             if self.position:
                 if self.entry_signal == 'long':
-                    if (self.trade_low is None) or (current_price < self.trade_low):
+                    if self.trade_low is None or current_price < self.trade_low:
                         self.trade_low = current_price
                     print(f"[DEBUG EXIT - LONG] {dt} | Current Price: {current_price:.5f} | TP: {self.current_tp:.5f} | SL: {self.current_sl:.5f}", flush=True)
                     if current_price >= self.current_tp:
@@ -213,7 +217,7 @@ class Plugin:
                         self.position.close()
                         return
                 elif self.entry_signal == 'short':
-                    if (self.trade_high is None) or (current_price > self.trade_high):
+                    if self.trade_high is None or current_price > self.trade_high:
                         self.trade_high = current_price
                     print(f"[DEBUG EXIT - SHORT] {dt} | Current Price: {current_price:.5f} | TP: {self.current_tp:.5f} | SL: {self.current_sl:.5f}", flush=True)
                     if current_price <= self.current_tp:
@@ -224,12 +228,13 @@ class Plugin:
                         print("[DEBUG EXIT - SHORT] Price above SL. Closing position early.", flush=True)
                         self.position.close()
                         return
-                return  # Do not check for new entries if a position is open.
-            # No open position: update extremes.
+                return  # If in a position, do not check for new entries.
+
+            # Not in a position: update extremes.
             self.trade_low = current_price
             self.trade_high = current_price
 
-            # Retrieve daily predictions from extra info.
+            # Retrieve daily predictions from the extra info.
             daily_preds_df = self.extra["daily"]
             try:
                 row = daily_preds_df.loc[dt]
@@ -241,31 +246,33 @@ class Plugin:
             max_pred = max(daily_preds)
             min_pred = min(daily_preds)
 
-            # Calculate entry conditions for LONG.
-            ideal_profit_pips_buy = (max_pred - current_price) / self.params.pip_cost
-            ideal_drawdown_pips_buy = max((current_price - min_pred) / self.params.pip_cost, self.params.min_drawdown_pips)
+            # Compute entry conditions for LONG.
+            ideal_profit_pips_buy = (max_pred - current_price) / self.extra["params_config"]['pip_cost']
+            ideal_drawdown_pips_buy = max((current_price - min_pred) / self.extra["params_config"]['pip_cost'],
+                                          self.extra["params_config"]['min_drawdown_pips'])
             rr_buy = ideal_profit_pips_buy / ideal_drawdown_pips_buy if ideal_drawdown_pips_buy > 0 else 0
-            tp_buy = current_price + self.params.tp_multiplier * ideal_profit_pips_buy * self.params.pip_cost
-            sl_buy = current_price - self.params.sl_multiplier * ideal_drawdown_pips_buy * self.params.pip_cost
+            tp_buy = current_price + self.extra["params_config"]['tp_multiplier'] * ideal_profit_pips_buy * self.extra["params_config"]['pip_cost']
+            sl_buy = current_price - self.extra["params_config"]['sl_multiplier'] * ideal_drawdown_pips_buy * self.extra["params_config"]['pip_cost']
 
-            # Calculate entry conditions for SHORT.
-            ideal_profit_pips_sell = (current_price - min_pred) / self.params.pip_cost
-            ideal_drawdown_pips_sell = max((max_pred - current_price) / self.params.pip_cost, self.params.min_drawdown_pips)
+            # Compute entry conditions for SHORT.
+            ideal_profit_pips_sell = (current_price - min_pred) / self.extra["params_config"]['pip_cost']
+            ideal_drawdown_pips_sell = max((max_pred - current_price) / self.extra["params_config"]['pip_cost'],
+                                           self.extra["params_config"]['min_drawdown_pips'])
             rr_sell = ideal_profit_pips_sell / ideal_drawdown_pips_sell if ideal_drawdown_pips_sell > 0 else 0
-            tp_sell = current_price - self.params.tp_multiplier * ideal_profit_pips_sell * self.params.pip_cost
-            sl_sell = current_price + self.params.sl_multiplier * ideal_drawdown_pips_sell * self.params.pip_cost
+            tp_sell = current_price - self.extra["params_config"]['tp_multiplier'] * ideal_profit_pips_sell * self.extra["params_config"]['pip_cost']
+            sl_sell = current_price + self.extra["params_config"]['sl_multiplier'] * ideal_drawdown_pips_sell * self.extra["params_config"]['pip_cost']
 
-            # Print entry debug information.
+            # Print entry debug info.
             print(f"[DEBUG ENTRY] {dt} | Current Price: {current_price:.5f}", flush=True)
             print(f"[DEBUG ENTRY - LONG] Profit: {ideal_profit_pips_buy:.2f} pips, Risk: {ideal_drawdown_pips_buy:.2f} pips, RR: {rr_buy:.2f}, TP: {tp_buy:.5f}, SL: {sl_buy:.5f}", flush=True)
             print(f"[DEBUG ENTRY - SHORT] Profit: {ideal_profit_pips_sell:.2f} pips, Risk: {ideal_drawdown_pips_sell:.2f} pips, RR: {rr_sell:.2f}, TP: {tp_sell:.5f}, SL: {sl_sell:.5f}", flush=True)
 
             # Determine which signal to take.
-            if (ideal_profit_pips_buy >= self.params.profit_threshold) and (rr_buy >= rr_sell):
+            if (ideal_profit_pips_buy >= self.extra["params_config"]['profit_threshold']) and (rr_buy >= rr_sell):
                 signal = 'long'
                 self.current_tp = tp_buy
                 self.current_sl = sl_buy
-            elif (ideal_profit_pips_sell >= self.params.profit_threshold) and (rr_sell > rr_buy):
+            elif (ideal_profit_pips_sell >= self.extra["params_config"]['profit_threshold']) and (rr_sell > rr_buy):
                 signal = 'short'
                 self.current_tp = tp_sell
                 self.current_sl = sl_sell
@@ -285,10 +292,13 @@ class Plugin:
                 print("[DEBUG] Order size <= 0, skipping trade", flush=True)
                 return
 
+            # Mark the entry.
+            self.trade_entry_dates = getattr(self, "trade_entry_dates", [])
             self.trade_entry_dates.append(dt)
             self.trade_entry_bar = len(self)
             self.current_volume = order_size
 
+            # Execute the order.
             if signal == 'long':
                 self.buy(size=order_size)
                 self.current_direction = 'long'
@@ -299,17 +309,17 @@ class Plugin:
                 print(f"[DEBUG ENTRY] SHORT order executed. Order Size: {order_size}", flush=True)
 
         def compute_size(self, rr):
-            min_vol = self.params.min_order_volume
-            max_vol = self.params.max_order_volume
-            if rr >= self.params.upper_rr_threshold:
+            min_vol = self.extra["params_config"]['min_order_volume']
+            max_vol = self.extra["params_config"]['max_order_volume']
+            if rr >= self.extra["params_config"]['upper_rr_threshold']:
                 size = max_vol
-            elif rr <= self.params.lower_rr_threshold:
+            elif rr <= self.extra["params_config"]['lower_rr_threshold']:
                 size = min_vol
             else:
-                size = min_vol + ((rr - self.params.lower_rr_threshold) /
-                                  (self.params.upper_rr_threshold - self.params.lower_rr_threshold)) * (max_vol - min_vol)
+                size = min_vol + ((rr - self.extra["params_config"]['lower_rr_threshold']) /
+                                  (self.extra["params_config"]['upper_rr_threshold'] - self.extra["params_config"]['lower_rr_threshold'])) * (max_vol - min_vol)
             cash = self.broker.cash
-            max_from_cash = cash * self.params.rel_volume * self.params.leverage
+            max_from_cash = cash * self.extra["params_config"]['rel_volume'] * self.extra["params_config"]['leverage']
             return min(size, max_from_cash)
 
         def notify_order(self, order):
@@ -325,11 +335,11 @@ class Plugin:
                 profit_usd = trade.pnl
                 direction = self.entry_signal
                 if direction == 'long':
-                    profit_pips = (exit_price - entry_price) / self.params.pip_cost
-                    intra_dd = (entry_price - self.trade_low) / self.params.pip_cost if self.trade_low is not None else 0
+                    profit_pips = (exit_price - entry_price) / self.extra["params_config"]['pip_cost']
+                    intra_dd = (entry_price - self.trade_low) / self.extra["params_config"]['pip_cost'] if self.trade_low is not None else 0
                 elif direction == 'short':
-                    profit_pips = (entry_price - exit_price) / self.params.pip_cost
-                    intra_dd = (self.trade_high - entry_price) / self.params.pip_cost if self.trade_high is not None else 0
+                    profit_pips = (entry_price - exit_price) / self.extra["params_config"]['pip_cost']
+                    intra_dd = (self.trade_high - entry_price) / self.extra["params_config"]['pip_cost'] if self.trade_high is not None else 0
                 else:
                     profit_pips = 0
                     intra_dd = 0
@@ -345,9 +355,7 @@ class Plugin:
                 self.entry_signal = None
 
         def stop(self):
-            n_trades = 0
-            if hasattr(self, 'trades') and self.trades:
-                n_trades = len(self.trades)
+            n_trades = len(getattr(self, 'trades', []))
             if n_trades > 0:
                 avg_profit_usd = sum(t['pnl'] for t in self.trades) / n_trades
                 avg_profit_pips = sum(t['pips'] for t in self.trades) / n_trades
