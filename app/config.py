@@ -17,7 +17,7 @@ DEFAULT_VALUES = {
 
     #"base_dataset_file": "tests\\data\\phase_1_base_d1.csv",
     "date_column": "DATE_TIME",
-    "plugin": "default",
+    "plugin": "zipline_ls_pred_strategy",
     "time_horizon": 6,
     "population_size": 20,
     "num_generations": 30,
