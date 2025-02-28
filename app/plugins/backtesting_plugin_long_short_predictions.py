@@ -66,7 +66,7 @@ class Plugin:
         import pandas as pd
         from backtesting import Backtest
 
-        # Desempaquetado: si el candidato tiene 12 valores se usan todos; si tiene 6, se usan los actuales para los demás.
+        # Desempaquetado: si el candidato tiene 12 valores se usan todos; si tiene 6 se asumen optimizados y se usan los valores actuales.
         if len(individual) == 12:
             pip_cost, rel_volume, min_order_volume, max_order_volume, leverage, profit_threshold, \
             min_drawdown_pips, tp_multiplier, sl_multiplier, lower_rr, upper_rr, time_horizon = individual
@@ -97,7 +97,7 @@ class Plugin:
             'time_horizon': int(time_horizon)
         })
 
-        # Auto-generar predicciones si no se han proporcionado
+        # Auto-generar predicciones si no se han proporcionado.
         if (config.get('hourly_predictions_file') is None) and (config.get('daily_predictions_file') is None):
             print(f"[evaluate_candidate] Auto-generating predictions using time_horizon={int(time_horizon)} for candidate {individual}.")
             from data_processor import process_data
@@ -105,7 +105,7 @@ class Plugin:
             hourly_predictions = processed["hourly"]
             daily_predictions = processed["daily"]
 
-        # Fusionar predicciones (opcional, para preservar la interfaz)
+        # Fusionar predicciones.
         merged_df = pd.DataFrame()
         if hourly_predictions is not None and not hourly_predictions.empty:
             renamed_h = {col: f"Prediction_h_{i+1}" for i, col in enumerate(hourly_predictions.columns)}
@@ -119,28 +119,41 @@ class Plugin:
             print(f"[evaluate_candidate] => Merged predictions are empty for candidate {individual}. Returning profit=0.0.")
             return (0.0, {"num_trades": 0, "win_pct": 0, "max_dd": 0, "sharpe": 0})
         merged_df.index.name = "DATE_TIME"
-        # Guardar temporalmente las predicciones (opcional)
         temp_pred_file = "temp_predictions.csv"
         merged_df.reset_index().to_csv(temp_pred_file, index=False)
 
-        # Preparar la "extra" información para la estrategia:
-        extra = {"hourly": hourly_predictions, "daily": daily_predictions, "params_config": self.params}
+        # Asegurarse de que base_data tenga las columnas requeridas por backtesting.py
+        # Requeridas: 'Open', 'High', 'Low', 'Close'
+        required_cols = ['Open', 'High', 'Low', 'Close']
+        for col in required_cols:
+            if col not in base_data.columns:
+                # Si existe la versión en mayúsculas de 'Close', se usa para las faltantes de Open, High y Low.
+                if col != 'Close' and 'Close' in base_data.columns:
+                    base_data[col] = base_data['Close']
+                else:
+                    raise ValueError(f"Base data must contain '{col}' column.")
 
-        # Asegurarse de que base_data sea un DataFrame y adjuntar extra como atributo.
+        # Asegurarse de que el índice es DatetimeIndex.
         base_data = base_data.copy()
         if not isinstance(base_data.index, pd.DatetimeIndex):
             base_data.index = pd.to_datetime(base_data.index)
-        base_data.extra = extra  # <--- Aquí se guarda la información extra
 
-        # Crear el objeto Backtest sin pasar "extra" como argumento, pues se adjunta al DataFrame.
-        from backtesting import Backtest
+        # Adjuntar información extra al DataFrame base (no se usa el argumento 'extra' en Backtest)
+        extra = {"hourly": hourly_predictions, "daily": daily_predictions, "params_config": self.params}
+        # Debido a que pandas no permite atributos nuevos en DataFrame, usamos setattr:
+        setattr(base_data, "extra", extra)
+
+        # Crear el objeto Backtest sin pasar "extra" como argumento.
         bt_sim = Backtest(base_data, self.HeuristicStrategy, cash=10000, commission=0.0, exclusive_orders=True)
         perf = bt_sim.run()
         final_balance = perf["Equity"].iloc[-1]
         profit = final_balance - 10000.0
         print(f"[ZIPLINE ANALYZE] Final Balance: {final_balance:.2f} | Profit: {profit:.2f}", flush=True)
-        # Retornar profit y performance
+        if os.path.exists(temp_pred_file):
+            os.remove(temp_pred_file)
         return (profit, {"portfolio": perf})
+
+
 
     class HeuristicStrategy(Strategy):
         def init(self):
