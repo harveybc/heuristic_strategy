@@ -230,7 +230,7 @@ class Plugin:
             self.order_direction = None
             self.trade_entry_bar = None
 
-            # Variables to store computed values for printing.
+            # Variables to store computed values for printing in notify_order.
             self.rr_buy = None
             self.rr_sell = None
             self.tp_buy = None
@@ -245,7 +245,7 @@ class Plugin:
             self.count_closed_early = 0
             self.exit_reason = None
 
-            # Temporary storage for order details (to preserve entry info)
+            # Temporary storage for order details.
             self._last_order = None
 
         def next(self):
@@ -269,7 +269,7 @@ class Plugin:
                         self.exit_reason = "TP"
                         self.close()
                         return
-                return  # Do not check new entries if position is open.
+                return  # Do not check new entries while a position is open.
             else:
                 # Reset extremes.
                 self.trade_low = current_price
@@ -328,7 +328,7 @@ class Plugin:
             self.trade_entry_bar = len(self)
             self.current_volume = order_size
 
-            # Store order details in a temporary dictionary.
+            # Store order details for later.
             self._last_order = {
                 "entry_price": current_price,
                 "direction": signal,
@@ -395,7 +395,7 @@ class Plugin:
                 elif direction == 'short':
                     self.count_short += 1
 
-                # With perfect predictions, exit reason should always be TP.
+                # With perfect predictions, exit reason should be TP.
                 exit_reason = "TP"
                 self.count_closed_tp += 1
 
@@ -435,14 +435,26 @@ class Plugin:
             else:
                 avg_profit_usd = avg_profit_pips = avg_duration = avg_max_dd = 0
             final_balance = self.broker.getvalue()
-            count_long = sum(1 for t in self.trades if t.get('direction')=='long')
-            count_short = sum(1 for t in self.trades if t.get('direction')=='short')
-            count_tp = sum(1 for t in self.trades if t.get('exit_reason')=='TP')
-            count_early = sum(1 for t in self.trades if t.get('exit_reason')=='Early_SL')
+            # Compute maximum relative drawdown.
+            peak = -float('inf')
+            max_rel_drawdown = 0
+            for b in self.balance_history:
+                if b > peak:
+                    peak = b
+                drawdown = (peak - b) / peak if peak != 0 else 0
+                if drawdown > max_rel_drawdown:
+                    max_rel_drawdown = drawdown
+
+            # Detailed summary.
+            count_long = sum(1 for t in self.trades if t.get('direction') == 'long')
+            count_short = sum(1 for t in self.trades if t.get('direction') == 'short')
+            count_tp = sum(1 for t in self.trades if t.get('exit_reason') == 'TP')
+            count_early = sum(1 for t in self.trades if t.get('exit_reason') == 'Early_SL')
             print("\n==== Summary ====")
             print(f"Initial Balance (USD): {self.initial_balance:.2f}")
             print(f"Final Balance (USD):   {final_balance:.2f}")
             print(f"Minimum Balance (USD): {min_balance:.2f}")
+            print(f"Maximum Relative Drawdown: {max_rel_drawdown*100:.2f}%")
             print(f"Number of Trades: {n_trades}")
             print(f"  Long Trades: {count_long}")
             print(f"  Short Trades: {count_short}")
