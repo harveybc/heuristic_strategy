@@ -3,7 +3,7 @@ import numpy as np
 import time
 from app.data_handler import load_csv
 from app.optimizer import run_optimizer
-
+_cached_auto_predictions = None
 # =============================================================================
 # DATA PROCESSOR FOR TRADING STRATEGY OPTIMIZATION
 # =============================================================================
@@ -70,17 +70,11 @@ def create_daily_predictions(df, horizon):
     return pd.DataFrame(blocks, index=daily_idx)
 
 def process_data(config):
-    """
-    Loads and processes datasets, ensuring alignment and applying max_steps.
-    - Uses external prediction files if provided.
-    - Generates predictions if files are not available.
-    - Ensures all datasets (base, hourly predictions, daily predictions) are properly aligned to the common date range.
-      Additionally, preserves the full base dataset (base_full) for later evaluation.
-    """
     import pandas as pd
     import numpy as np
     import json
     from app.data_handler import load_csv
+    global _cached_auto_predictions
 
     headers = config.get("headers", True)
     print("Loading datasets...")
@@ -91,21 +85,22 @@ def process_data(config):
     base_df = load_csv(config["base_dataset_file"], headers=headers)
     print(f"Base dataset loaded: {base_df.shape}")
 
-    # Conserva una copia completa del base dataset para la evaluación
+    # Preserve a full copy of the base dataset for later evaluation.
     base_df_full = base_df.copy()
 
-    # Auto-generate predictions if files are missing
-    if hourly_df is None:
-        if "time_horizon" not in config or not config["time_horizon"]:
-            raise ValueError("time_horizon must be provided when auto-generating predictions.")
-        print("Auto-generating hourly predictions...")
-        hourly_df = create_hourly_predictions(base_df, config["time_horizon"])
-
-    if daily_df is None:
-        if "time_horizon" not in config or not config["time_horizon"]:
-            raise ValueError("time_horizon must be provided when auto-generating predictions.")
-        print("Auto-generating daily predictions...")
-        daily_df = create_daily_predictions(base_df, config["time_horizon"])
+    # Auto-generate predictions if files are missing.
+    if hourly_df is None and daily_df is None:
+        if _cached_auto_predictions is None:
+            if "time_horizon" not in config or not config["time_horizon"]:
+                raise ValueError("time_horizon must be provided when auto-generating predictions.")
+            print("Auto-generating hourly predictions...")
+            hourly_df = create_hourly_predictions(base_df, config["time_horizon"])
+            print("Auto-generating daily predictions...")
+            daily_df = create_daily_predictions(base_df, config["time_horizon"])
+            _cached_auto_predictions = {"hourly": hourly_df, "daily": daily_df}
+        else:
+            hourly_df = _cached_auto_predictions["hourly"]
+            daily_df = _cached_auto_predictions["daily"]
 
     # Ensure that hourly and daily predictions have a datetime index based on DATE_TIME column, if not already set.
     if hourly_df is not None:
@@ -133,12 +128,12 @@ def process_data(config):
     if common_index.empty:
         raise ValueError("No common date range found among base, hourly, and daily predictions.")
 
-    # Aquí se recortan los tres datasets al rango común
-    base_df = base_df.loc[common_index]         # <-- Alinea el dataset base
+    # Trim the three datasets to the common date range.
+    base_df = base_df.loc[common_index]         # <-- Align base dataset
     hourly_df = hourly_df.loc[common_index]
     daily_df = daily_df.loc[common_index]
 
-    # Verify that all datasets have the same number of rows
+    # Verify that all datasets have the same number of rows.
     if not (len(base_df) == len(hourly_df) == len(daily_df)):
         min_len = min(len(base_df), len(hourly_df), len(daily_df))
         print("Warning: After alignment, the number of rows differ. Trimming each dataset to the minimum length:", min_len)
@@ -148,12 +143,13 @@ def process_data(config):
         if not (len(base_df) == len(hourly_df) == len(daily_df)):
             raise ValueError("After alignment and trimming, the number of rows in base, hourly, and daily predictions still do not match!")
 
-    # Print aligned date ranges
+    # Print aligned date ranges.
     print(f"Aligned Base dataset range: {base_df.index.min()} to {base_df.index.max()}")
     print(f"Aligned Hourly predictions range: {hourly_df.index.min()} to {hourly_df.index.max()}")
     print(f"Aligned Daily predictions range: {daily_df.index.min()} to {daily_df.index.max()}")
 
     return {"hourly": hourly_df, "daily": daily_df, "base": base_df, "base_full": base_df_full}
+
 
 def run_processing_pipeline(config, plugin):
     """
