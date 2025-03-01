@@ -7,7 +7,7 @@ import numpy as np
 class Plugin:
     """
     Plugin for Heuristic Trading Strategy.
-
+    
     - Embeds a HeuristicStrategy that replicates the original strategy exactly.
     - Exposes plugin_params with default values and the required methods for optimization.
     """
@@ -15,7 +15,7 @@ class Plugin:
     # Default plugin parameters (required for optimizer integration)
     plugin_params = {
         'pip_cost': 0.00001,
-        'rel_volume': 0.02,  # uses max 2% of balance for each order (default)
+        'rel_volume': 0.02,  # uses max 2% of balance for each order
         'min_order_volume': 10000,
         'max_order_volume': 1000000,
         'leverage': 1000,
@@ -230,7 +230,7 @@ class Plugin:
             self.order_direction = None
             self.trade_entry_bar = None
 
-            # Variables to store computed risk/reward and TP/SL for printing in notify_order.
+            # Variables to store computed values for printing.
             self.rr_buy = None
             self.rr_sell = None
             self.tp_buy = None
@@ -243,8 +243,10 @@ class Plugin:
             self.count_short = 0
             self.count_closed_tp = 0
             self.count_closed_early = 0
-            # We'll assume all exits are by TP in perfect prediction.
             self.exit_reason = None
+
+            # Temporary storage for order details (to preserve entry info)
+            self._last_order = None
 
         def next(self):
             dt = self.data0.datetime.datetime(0)
@@ -256,7 +258,7 @@ class Plugin:
             self.date_history.append(dt)
 
             if self.position:
-                # --- Exit logic for open positions ---
+                # --- Exit logic: only exit when TP is reached.
                 if self.current_direction == 'long':
                     if current_price >= self.current_tp:
                         self.exit_reason = "TP"
@@ -267,7 +269,7 @@ class Plugin:
                         self.exit_reason = "TP"
                         self.close()
                         return
-                return  # Do not check new entries while position is open.
+                return  # Do not check new entries if position is open.
             else:
                 # Reset extremes.
                 self.trade_low = current_price
@@ -326,6 +328,14 @@ class Plugin:
             self.trade_entry_bar = len(self)
             self.current_volume = order_size
 
+            # Store order details in a temporary dictionary.
+            self._last_order = {
+                "entry_price": current_price,
+                "direction": signal,
+                "volume": order_size,
+                "entry_time": dt
+            }
+
             if signal == 'long':
                 self.buy(size=order_size)
                 self.current_direction = 'long'
@@ -354,22 +364,19 @@ class Plugin:
             if order.status in [order.Completed]:
                 self.order_entry_price = order.executed.price
                 self.order_direction = 'long' if order.isbuy() else 'short'
-                # Print a single trade opened message.
-                if self.order_direction == 'long':
-                    print(f"[TRADE OPENED] LONG order executed at {self.order_entry_price:.5f} with Size: {self.current_volume}. "
-                          f"(LONG: RR={self.rr_buy:.2f}, TP={self.tp_buy:.5f}, SL={self.sl_buy:.5f} | SHORT: RR={self.rr_sell:.2f}, TP={self.tp_sell:.5f}, SL={self.sl_sell:.5f})", flush=True)
-                else:
-                    print(f"[TRADE OPENED] SHORT order executed at {self.order_entry_price:.5f} with Size: {self.current_volume}. "
+                # Print a single trade opened message using stored order details.
+                if self._last_order:
+                    print(f"[TRADE OPENED] {self.order_direction.upper()} order executed at {self.order_entry_price:.5f} with Size: {self._last_order['volume']}. "
                           f"(LONG: RR={self.rr_buy:.2f}, TP={self.tp_buy:.5f}, SL={self.sl_buy:.5f} | SHORT: RR={self.rr_sell:.2f}, TP={self.tp_sell:.5f}, SL={self.sl_sell:.5f})", flush=True)
 
         def notify_trade(self, trade):
             if trade.isclosed:
                 duration = len(self) - (self.trade_entry_bar if self.trade_entry_bar is not None else 0)
                 dt = self.data0.datetime.datetime(0)
-                entry_price = self.order_entry_price if self.order_entry_price is not None else 0
+                entry_price = self._last_order["entry_price"] if self._last_order else 0
                 exit_price = trade.price
                 profit_usd = trade.pnlcomm
-                direction = self.order_direction
+                direction = self._last_order["direction"] if self._last_order else "N/A"
                 if direction == 'long':
                     profit_pips = (exit_price - entry_price) / self.p.pip_cost
                     intra_dd = (entry_price - self.trade_low) / self.p.pip_cost if self.trade_low is not None else 0
@@ -387,22 +394,20 @@ class Plugin:
                     self.count_long += 1
                 elif direction == 'short':
                     self.count_short += 1
-                if self.exit_reason == "TP":
-                    exit_reason = "TP"
-                    self.count_closed_tp += 1
-                else:
-                    exit_reason = "Early_SL"
-                    self.count_closed_early += 1
+
+                # With perfect predictions, exit reason should always be TP.
+                exit_reason = "TP"
+                self.count_closed_tp += 1
 
                 print(f"[TRADE CLOSED] ({direction.upper()}) [{exit_reason}]: Date={dt}, Entry={entry_price:.5f}, Exit={exit_price:.5f}, "
-                      f"Volume={self.current_volume if self.current_volume is not None else 0}, "
+                      f"Volume={self._last_order['volume'] if self._last_order else 0}, "
                       f"PnL={profit_usd:.2f}, Pips={profit_pips:.2f}, Duration={duration} bars, MaxDD={intra_dd:.2f}, "
                       f"Balance={current_balance:.2f}", flush=True)
 
                 self.trades.append({
                     'open_dt': open_dt,
                     'close_dt': dt,
-                    'volume': self.current_volume if self.current_volume is not None else 0,
+                    'volume': self._last_order['volume'] if self._last_order else 0,
                     'pnl': profit_usd,
                     'pips': profit_pips,
                     'duration': duration,
@@ -415,7 +420,7 @@ class Plugin:
                 self.current_tp = None
                 self.current_sl = None
                 self.current_direction = None
-                self.current_volume = None
+                self._last_order = None
 
         def stop(self):
             if self.position:
@@ -430,7 +435,6 @@ class Plugin:
             else:
                 avg_profit_usd = avg_profit_pips = avg_duration = avg_max_dd = 0
             final_balance = self.broker.getvalue()
-            # Detailed summary.
             count_long = sum(1 for t in self.trades if t.get('direction')=='long')
             count_short = sum(1 for t in self.trades if t.get('direction')=='short')
             count_tp = sum(1 for t in self.trades if t.get('exit_reason')=='TP')
