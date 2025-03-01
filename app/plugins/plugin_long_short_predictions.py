@@ -75,7 +75,7 @@ class Plugin:
             pip_cost = self.params['pip_cost']
             rel_volume = self.params['rel_volume']
             min_order_volume = self.params['min_order_volume']
-            max_order_volume = self.params['max_order_volume']
+            max_order_order = self.params['max_order_volume']
             leverage = self.params['leverage']
             min_drawdown_pips = self.params['min_drawdown_pips']
         else:
@@ -183,7 +183,6 @@ class Plugin:
               f"Sharpe: {stats.get('sharpe', 0):.2f}")
         return (profit, stats)
 
-
     class HeuristicStrategy(bt.Strategy):
         """
         Forex Dynamic Volume Strategy using perfect future predictions.
@@ -239,15 +238,12 @@ class Plugin:
             self.balance_history.append(balance)
             self.date_history.append(dt)
             
-            # --- Exit logic: if a position is open, use exit conditions without printing debug messages.
+            # --- Exit logic: if a position is open, use exit conditions silently.
             if self.position:
                 if self.current_direction == 'long':
                     if self.trade_low is None or current_price < self.trade_low:
                         self.trade_low = current_price
-                    if dt_hour in self.pred_df.index:
-                        row = self.pred_df.loc[dt_hour]
-                    else:
-                        row = self.pred_df.iloc[-1]
+                    row = self.pred_df.loc[dt_hour] if dt_hour in self.pred_df.index else self.pred_df.iloc[-1]
                     preds_hourly = [row.get(f'Prediction_h_{i}', current_price) for i in range(1, self.num_hourly_preds + 1)]
                     preds_daily = [row.get(f'Prediction_d_{i}', current_price) for i in range(1, self.num_daily_preds + 1)]
                     predicted_min = min(preds_hourly + preds_daily)
@@ -257,27 +253,21 @@ class Plugin:
                 elif self.current_direction == 'short':
                     if self.trade_high is None or current_price > self.trade_high:
                         self.trade_high = current_price
-                    if dt_hour in self.pred_df.index:
-                        row = self.pred_df.loc[dt_hour]
-                    else:
-                        row = self.pred_df.iloc[-1]
+                    row = self.pred_df.loc[dt_hour] if dt_hour in self.pred_df.index else self.pred_df.iloc[-1]
                     preds_hourly = [row.get(f'Prediction_h_{i}', current_price) for i in range(1, self.num_hourly_preds + 1)]
                     preds_daily = [row.get(f'Prediction_d_{i}', current_price) for i in range(1, self.num_daily_preds + 1)]
                     predicted_max = max(preds_hourly + preds_daily)
                     if current_price <= self.current_tp or predicted_max > self.current_sl:
                         self.close()
                         return
-                return  # Do not search for new entries while a position is open.
+                return  # Do not look for new entries while a position is open.
             else:
                 # Reset extremes when no position is open.
                 self.trade_low = current_price
                 self.trade_high = current_price
 
-            # --- Trading frequency control and entry signal ---
-            if dt_hour in self.pred_df.index:
-                row = self.pred_df.loc[dt_hour]
-            else:
-                row = self.pred_df.iloc[-1]
+            # --- Entry signal ---
+            row = self.pred_df.loc[dt_hour] if dt_hour in self.pred_df.index else self.pred_df.iloc[-1]
             try:
                 daily_preds = [row[f'Prediction_d_{i}'] for i in range(1, self.num_daily_preds + 1)]
             except KeyError:
@@ -302,12 +292,6 @@ class Plugin:
             tp_sell = current_price - self.p.tp_multiplier * ideal_profit_pips_sell * self.p.pip_cost
             sl_sell = current_price + self.p.sl_multiplier * ideal_drawdown_pips_sell * self.p.pip_cost
 
-            # Only one message for trade entry.
-            # Print trade opened message including risk/reward for both buy and sell.
-            print(f"[TRADE OPENED] Current Price: {current_price:.5f} | "
-                  f"LONG -> RR: {rr_buy:.2f}, TP: {tp_buy:.5f}, SL: {sl_buy:.5f} | "
-                  f"SHORT -> RR: {rr_sell:.2f}, TP: {tp_sell:.5f}, SL: {sl_sell:.5f}", flush=True)
-
             long_signal = (ideal_profit_pips_buy >= self.p.profit_threshold)
             short_signal = (ideal_profit_pips_sell >= self.p.profit_threshold)
 
@@ -326,7 +310,7 @@ class Plugin:
 
             # Save entry metrics.
             self.entry_profit = ideal_profit_pips_buy if signal == 'long' else ideal_profit_pips_sell
-            self.entry_risk = ideal_drawdown_pips_buy if signal == 'long' else ideal_drawdown_pips_sell
+            self.entry_risk = ideal_drawdown_pips_buy if signal == 'long' else ideal_drawdown_pips_buy
             self.entry_rr = chosen_rr
             self.entry_signal = signal
 
@@ -338,14 +322,17 @@ class Plugin:
             self.trade_entry_bar = len(self)
             self.current_volume = order_size
 
+            # Only print one combined message upon order execution.
             if signal == 'long':
                 self.buy(size=order_size)
                 self.current_direction = 'long'
-                print(f"[TRADE OPENED] LONG order executed. Order Size: {order_size}", flush=True)
+                print(f"[TRADE OPENED] LONG order executed at {current_price:.5f} with Size: {order_size}. "
+                      f"(LONG: RR={rr_buy:.2f}, TP={tp_buy:.5f}, SL={sl_buy:.5f} | SHORT: RR={rr_sell:.2f}, TP={tp_sell:.5f}, SL={sl_sell:.5f})", flush=True)
             elif signal == 'short':
                 self.sell(size=order_size)
                 self.current_direction = 'short'
-                print(f"[TRADE OPENED] SHORT order executed. Order Size: {order_size}", flush=True)
+                print(f"[TRADE OPENED] SHORT order executed at {current_price:.5f} with Size: {order_size}. "
+                      f"(LONG: RR={rr_buy:.2f}, TP={tp_buy:.5f}, SL={sl_buy:.5f} | SHORT: RR={rr_sell:.2f}, TP={tp_sell:.5f}, SL={sl_sell:.5f})", flush=True)
 
             self.current_tp = chosen_tp
             self.current_sl = chosen_sl
@@ -394,7 +381,6 @@ class Plugin:
                       f"PnL={profit_usd:.2f}, Pips={profit_pips:.2f}, Duration={duration} bars, MaxDD={intra_dd:.2f}, "
                       f"Balance={current_balance:.2f}", flush=True)
 
-                # Record the trade.
                 self.trades.append({
                     'open_dt': open_dt,
                     'close_dt': dt,
@@ -443,9 +429,9 @@ class Plugin:
             plt.savefig("balance_plot.png")
             plt.close()
 
-    # -------------------------------------------------------------------------
+    # -----------------------------------------------------------------------------
     # Dummy methods for interface compatibility
-    # -------------------------------------------------------------------------
+    # -----------------------------------------------------------------------------
     def add_debug_info(self, debug_info):
         debug_info.update(self.get_debug_info())
 
