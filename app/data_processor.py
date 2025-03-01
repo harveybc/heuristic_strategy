@@ -240,6 +240,15 @@ def run_processing_pipeline(config, plugin):
     print(f"  Hourly predictions: {hourly_preds.shape}")
     print(f"  Daily predictions:  {daily_preds.shape}")
 
+    # <<<< NEW: Trim datasets to config['max_steps'] >>>>
+    if config.get("max_steps") is not None:
+        max_steps = int(config["max_steps"])
+        base_data = base_data.iloc[:max_steps]
+        hourly_preds = hourly_preds.iloc[:max_steps]
+        daily_preds = daily_preds.iloc[:max_steps]
+        print(f"Datasets trimmed to max_steps: {max_steps} rows.")
+    # <<<< End trimming >>>>
+
     # Proceed with sending data to the plugin (evaluation or optimization)
     if config.get("load_parameters") is not None:
         try:
@@ -326,6 +335,8 @@ def run_processing_pipeline(config, plugin):
     end_time = time.time()
     print(f"\nTotal Execution Time: {end_time - start_time:.2f} seconds")
     return trading_info, getattr(plugin, "trades", None)
+
+
 
 if __name__ == "__main__":
     pass

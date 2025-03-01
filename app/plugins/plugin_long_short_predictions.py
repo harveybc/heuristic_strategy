@@ -290,9 +290,9 @@ class Plugin:
 
             # --- Control de frecuencia de trading ---
             recent_trades = [d for d in self.trade_entry_dates if (dt - d).days < 5]
-            if len(recent_trades) >= self.p.max_trades_per_5days:
-                print(f"[DEBUG] Trade frequency exceeded: {len(recent_trades)} trades in last 5 days.", flush=True)
-                return
+            #if len(recent_trades) >= self.p.max_trades_per_5days:
+            #    print(f"[DEBUG] Trade frequency exceeded: {len(recent_trades)} trades in last 5 days.", flush=True)
+            #    return
 
             if dt_hour in self.pred_df.index:
                 row = self.pred_df.loc[dt_hour]
