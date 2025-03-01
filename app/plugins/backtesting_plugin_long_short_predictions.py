@@ -17,7 +17,7 @@ class Plugin:
     - Once in a trade, it monitors the market (each tick, assumed hourly) and exits if either
       the take profit (TP) is reached or the stop loss (SL) is breached.
     - Only one order is active at a time.
-    - All key parameters (e.g. pip cost, volume limits, thresholds, multipliers, etc.) are configurable and optimizable.
+    - All key parameters (e.g., pip cost, volume limits, thresholds, multipliers, etc.) are configurable and optimizable.
     """
 
     # Default plugin parameters (for optimizer integration)
@@ -178,18 +178,18 @@ class Plugin:
         Heuristic Trading Strategy.
 
         Entry:
-          - Uses daily predictions (nearest available via forward-fill) to compute potential profit and risk (in pips)
+          - Uses daily predictions (via forward-fill lookup) to compute potential profit and risk (in pips)
             for both long and short orders.
           - Compares the risk/reward ratios and enters a trade if the potential profit exceeds a threshold.
           - Order volume is computed proportionally between min_order_volume and max_order_volume.
         Exit:
-          - On every tick (assumed hourly), if a position is open, it checks:
-              * For long: if the current price reaches TP or falls below SL.
-              * For short: if the current price reaches TP or rises above SL.
+          - On every tick (assumed hourly), if a position is open, checks:
+              * For long: if the price reaches TP or falls below SL.
+              * For short: if the price reaches TP or rises above SL.
         """
         def init(self):
             global EXTRA_INFO
-            self.extra = EXTRA_INFO  # Retrieve extra info
+            self.extra = EXTRA_INFO  # Retrieve extra info (predictions and parameters)
             self.trade_entry_bar = None
             self.trade_low = None
             self.trade_high = None
@@ -232,21 +232,22 @@ class Plugin:
                         print("[DEBUG EXIT - SHORT] Price above SL. Closing position early.", flush=True)
                         self.position.close()
                         return
-                return  # If in a position, do not check for new entries.
+                return  # Do not check for new entries if a position is open.
 
             # Not in a position: update extremes.
             self.trade_low = current_price
             self.trade_high = current_price
 
-            # Retrieve daily predictions using nearest (forward-fill) lookup.
+            # Retrieve daily predictions from extra info using a forward-fill lookup.
             daily_preds_df = self.extra["daily"]
             idx = daily_preds_df.index.get_indexer([dt], method='ffill')
             if idx[0] == -1:
                 row = daily_preds_df.iloc[0]
             else:
                 row = daily_preds_df.iloc[idx[0]]
-            # Use str() conversion for column names.
+            # Debug: Print the retrieved daily predictions.
             daily_preds = [row[col] for col in row.index if str(col).startswith("Prediction_d_")]
+            print(f"[DEBUG] Daily predictions used at {dt}: {daily_preds}", flush=True)
             if not daily_preds:
                 return
             max_pred = max(daily_preds)
