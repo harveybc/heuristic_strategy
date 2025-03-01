@@ -227,7 +227,14 @@ class Plugin:
             self.current_direction = None
             self.order_direction = None
             self.trade_entry_bar = None
-            self.order_sent = False  # Flag to prevent multiple orders in the same bar
+
+            # These variables will store the risk/reward and TP/SL values calculated in next()
+            self.rr_buy = None
+            self.rr_sell = None
+            self.tp_buy = None
+            self.sl_buy = None
+            self.tp_sell = None
+            self.sl_sell = None
 
         def next(self):
             dt = self.data0.datetime.datetime(0)
@@ -239,32 +246,29 @@ class Plugin:
             self.balance_history.append(balance)
             self.date_history.append(dt)
             
-            # If a position is open or an order has already been sent this bar, skip entry.
-            if self.position or self.order_sent:
-                if self.position:
-                    if self.current_direction == 'long':
-                        if self.trade_low is None or current_price < self.trade_low:
-                            self.trade_low = current_price
-                        row = self.pred_df.loc[dt_hour] if dt_hour in self.pred_df.index else self.pred_df.iloc[-1]
-                        preds_hourly = [row.get(f'Prediction_h_{i}', current_price) for i in range(1, self.num_hourly_preds + 1)]
-                        preds_daily = [row.get(f'Prediction_d_{i}', current_price) for i in range(1, self.num_daily_preds + 1)]
-                        predicted_min = min(preds_hourly + preds_daily)
-                        if current_price >= self.current_tp or predicted_min < self.current_sl:
-                            self.close()
-                            self.order_sent = False
-                            return
-                    elif self.current_direction == 'short':
-                        if self.trade_high is None or current_price > self.trade_high:
-                            self.trade_high = current_price
-                        row = self.pred_df.loc[dt_hour] if dt_hour in self.pred_df.index else self.pred_df.iloc[-1]
-                        preds_hourly = [row.get(f'Prediction_h_{i}', current_price) for i in range(1, self.num_hourly_preds + 1)]
-                        preds_daily = [row.get(f'Prediction_d_{i}', current_price) for i in range(1, self.num_daily_preds + 1)]
-                        predicted_max = max(preds_hourly + preds_daily)
-                        if current_price <= self.current_tp or predicted_max > self.current_sl:
-                            self.close()
-                            self.order_sent = False
-                            return
-                return  # Do not look for new entries if position is open or order already sent.
+            # --- Exit logic: if a position is open, evaluate exit conditions silently.
+            if self.position:
+                if self.current_direction == 'long':
+                    if self.trade_low is None or current_price < self.trade_low:
+                        self.trade_low = current_price
+                    row = self.pred_df.loc[dt_hour] if dt_hour in self.pred_df.index else self.pred_df.iloc[-1]
+                    preds_hourly = [row.get(f'Prediction_h_{i}', current_price) for i in range(1, self.num_hourly_preds + 1)]
+                    preds_daily = [row.get(f'Prediction_d_{i}', current_price) for i in range(1, self.num_daily_preds + 1)]
+                    predicted_min = min(preds_hourly + preds_daily)
+                    if current_price >= self.current_tp or predicted_min < self.current_sl:
+                        self.close()
+                        return
+                elif self.current_direction == 'short':
+                    if self.trade_high is None or current_price > self.trade_high:
+                        self.trade_high = current_price
+                    row = self.pred_df.loc[dt_hour] if dt_hour in self.pred_df.index else self.pred_df.iloc[-1]
+                    preds_hourly = [row.get(f'Prediction_h_{i}', current_price) for i in range(1, self.num_hourly_preds + 1)]
+                    preds_daily = [row.get(f'Prediction_d_{i}', current_price) for i in range(1, self.num_daily_preds + 1)]
+                    predicted_max = max(preds_hourly + preds_daily)
+                    if current_price <= self.current_tp or predicted_max > self.current_sl:
+                        self.close()
+                        return
+                return  # Do not evaluate new entries if a position is open.
             else:
                 # Reset extremes when no position is open.
                 self.trade_low = current_price
@@ -296,6 +300,14 @@ class Plugin:
             tp_sell = current_price - self.p.tp_multiplier * ideal_profit_pips_sell * self.p.pip_cost
             sl_sell = current_price + self.p.sl_multiplier * ideal_drawdown_pips_sell * self.p.pip_cost
 
+            # Save the calculated risk/reward and TP/SL values for later printing in notify_order.
+            self.rr_buy = rr_buy
+            self.rr_sell = rr_sell
+            self.tp_buy = tp_buy
+            self.sl_buy = sl_buy
+            self.tp_sell = tp_sell
+            self.sl_sell = sl_sell
+
             if (ideal_profit_pips_buy >= self.p.profit_threshold) and (rr_buy >= rr_sell):
                 signal = 'long'
                 chosen_tp = tp_buy
@@ -310,7 +322,7 @@ class Plugin:
                 return
 
             self.entry_profit = ideal_profit_pips_buy if signal == 'long' else ideal_profit_pips_sell
-            self.entry_risk = ideal_drawdown_pips_buy if signal == 'long' else ideal_drawdown_pips_buy
+            self.entry_risk = ideal_drawdown_pips_buy  # same for both signals per original
             self.entry_rr = chosen_rr
             self.entry_signal = signal
 
@@ -322,19 +334,13 @@ class Plugin:
             self.trade_entry_bar = len(self)
             self.current_volume = order_size
 
-            # Mark order as sent.
-            self.order_sent = True
-
+            # Place the order without printing here.
             if signal == 'long':
                 self.buy(size=order_size)
                 self.current_direction = 'long'
-                print(f"[TRADE OPENED] LONG order executed at {current_price:.5f} with Size: {order_size}. "
-                      f"(LONG: RR={rr_buy:.2f}, TP={tp_buy:.5f}, SL={sl_buy:.5f} | SHORT: RR={rr_sell:.2f}, TP={tp_sell:.5f}, SL={sl_sell:.5f})", flush=True)
             elif signal == 'short':
                 self.sell(size=order_size)
                 self.current_direction = 'short'
-                print(f"[TRADE OPENED] SHORT order executed at {current_price:.5f} with Size: {order_size}. "
-                      f"(LONG: RR={rr_buy:.2f}, TP={tp_buy:.5f}, SL={sl_buy:.5f} | SHORT: RR={rr_sell:.2f}, TP={tp_sell:.5f}, SL={sl_sell:.5f})", flush=True)
 
             self.current_tp = chosen_tp
             self.current_sl = chosen_sl
@@ -357,7 +363,13 @@ class Plugin:
             if order.status in [order.Completed]:
                 self.order_entry_price = order.executed.price
                 self.order_direction = 'long' if order.isbuy() else 'short'
-                self.order_sent = False
+                # Print a single trade opened message when order is completed.
+                if self.order_direction == 'long':
+                    print(f"[TRADE OPENED] LONG order executed at {self.order_entry_price:.5f} with Size: {self.current_volume}. "
+                          f"(LONG: RR={self.rr_buy:.2f}, TP={self.tp_buy:.5f}, SL={self.sl_buy:.5f} | SHORT: RR={self.rr_sell:.2f}, TP={self.tp_sell:.5f}, SL={self.sl_sell:.5f})", flush=True)
+                else:
+                    print(f"[TRADE OPENED] SHORT order executed at {self.order_entry_price:.5f} with Size: {self.current_volume}. "
+                          f"(LONG: RR={self.rr_buy:.2f}, TP={self.tp_buy:.5f}, SL={self.sl_buy:.5f} | SHORT: RR={self.rr_sell:.2f}, TP={self.tp_sell:.5f}, SL={self.sl_sell:.5f})", flush=True)
 
         def notify_trade(self, trade):
             if trade.isclosed:
